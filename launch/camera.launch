@@ -1,0 +1,30 @@
+<launch>
+	<arg name="input" default="csi://0"/>
+	<arg name="input_width" default="1920"/>
+	<arg name="input_height" default="1080"/>
+	<arg name="input_codec" default="unknown"/>
+	<arg name="input_loop" default="0"/>
+	<arg name="input_latency" default="5000"/>
+	
+	<node pkg="visionconnect" exec="camera" output="screen">
+		<param name="resource" value="$(var input)"/>
+		<param name="width" value="$(var input_width)"/>
+		<param name="height" value="$(var input_height)"/>
+		<param name="codec" value="$(var input_codec)"/>
+		<param name="loop" value="$(var input_loop)"/>
+		<param name="latency" value="$(var input_latency)"/>
+	</node>
+	
+	<arg name="output" default="display://0"/>
+	<arg name="output_codec" default="unknown"/>
+	<arg name="output_bitrate" default="0"/>
+	<arg name="topic" default="/camera/raw"/>
+
+	<node pkg="visionconnect" exec="preview" output="screen">
+		<remap from="/preview/image_in" to="$(var topic)"/>
+		<param name="resource" value="$(var output)"/>
+		<param name="codec" value="$(var output_codec)"/>
+		<param name="bitrate" value="$(var output_bitrate)"/>
+	</node>
+
+</launch>

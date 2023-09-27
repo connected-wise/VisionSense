@@ -1,0 +1,6 @@
+CMakeCache.txt
+__pycache__/
+.vscode/
+build/
+install/
+log/

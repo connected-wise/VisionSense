@@ -1,0 +1,52 @@
+added lane
+bike lane
+bus stop
+chevron
+children
+curve ahead
+dead end
+divided highway
+do not enter
+flager
+green light
+guide sign
+intersection ahead
+lane reduction
+merge
+no left turn
+no parking
+no right turn
+no trucks
+no turn-on-red
+no u-turn
+no waiting
+one way
+pedestrian
+railroad
+red light
+road work
+school zone
+slippery road
+speed 15
+speed 20
+speed 25
+speed 30
+speed 35
+speed 40
+speed 45
+speed 50
+speed 55
+speed 60
+speed 65
+speed 70
+stop on red
+stop sign
+stop ahead
+tintersection
+traffic signal ahead
+turn
+two-way traffic
+wildlife crossing
+workers present
+yellow
+yield

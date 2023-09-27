@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VisionConnect ROS Dashboard</title>
+    <script src="./roslib.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            width: 98%;
+            max-width: 2000px;
+            margin: 20px auto;
+            background-color: #fff;
+            padding: 20px;
+            box-shadow: 0px 0px 5px #aaa;
+        }
+
+        .title {
+            position: relative;
+            padding: 20px 10px;  /* Increased padding at top and bottom */
+            background-color: #333;
+            color: #fff;
+            margin-bottom: 20px;
+            font-size: 24px;
+            text-align: center; /* center the title */
+        }
+
+        .logo {
+            position: absolute;
+            left: 10px; /* position logo at the left */
+            top: 50%;
+            transform: translateY(-50%); /* center vertically */
+            height: 50px;
+        }
+
+        .canvas-container {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .canvas-section {
+            width: 32%;
+            text-align: center;
+            margin: 0 5px;
+        }
+
+        canvas {
+            display: block;
+            margin: 10px auto;
+            background-color: #ddd;
+        }
+
+        .canvas-title {
+            margin: 10px 0;
+            font-weight: bold;
+            font-size: 20px; 
+        }
+        
+        .logs {
+            margin-top: 10px;
+            border: 1px solid #ddd;
+            padding: 10px;
+            font-size: 18px;
+            height: 120px; /* Adjust as needed */
+            overflow: auto; /* Scrollbar if content overflows */
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+    <div class="title">
+        <img class="logo" src="cw-logo.webp" alt="Connected Wise LLC">
+        VisionConnect ROS Dashboard
+    </div>
+
+    <!-- First Row of Canvases -->
+    <div class="canvas-container">
+        <div class="canvas-section">
+            <div class="canvas-title">Raw Camera Output</div>
+            <canvas id="cameraCanvas" width="640" height="360"></canvas>
+            <div class="logs" id="cameraLog">
+                <!-- JS will insert object detection logs here -->
+            </div>
+        </div>
+
+        <div class="canvas-section">
+            <div class="canvas-title">Lane Detection Output</div>
+            <canvas id="laneCanvas" width="640" height="360"></canvas>
+            <div class="logs" id="lanesLog">
+                <!-- JS will insert lane detection logs here -->
+            </div>
+        </div>
+
+        <div class="canvas-section">
+            <div class="canvas-title">Object Detection Output</div>
+            <canvas id="objectCanvas" width="640" height="360"></canvas>
+            <div class="logs" id="detectionLog">
+                <!-- JS will insert object detection logs here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Second Row of Canvases -->
+    <div class="canvas-container">
+        <!-- Traffic Sign and Light Recognition -->
+        <div class="canvas-section">
+            <div class="canvas-title">Traffic Sign and Light Recognition</div>
+            <canvas id="trafficSignCanvas" width="640" height="360"></canvas>
+            <div class="logs" id="trafficSignLog">
+                <!-- JS will insert logs here -->
+            </div>
+        </div>
+
+        <!-- Fused Perception Output -->
+        <div class="canvas-section" style="flex-basis: 64%; margin-right: 40px;">
+            <div class="canvas-title">Fused Perception Output</div>
+            <canvas id="fusedOutputCanvas" width="1310" height="730"></canvas>
+        </div>
+    </div>
+</div>
+
+<footer>
+    <div class="container">
+        <p style="text-align:center; font-size: 14px; padding: 20px 0; border-top: 1px solid #ddd; margin-top: 20px;">
+            &copy; 2023 Connected Wise LLC. This tool is designed by <a href="https://connectedwise.com">Connected Wise LLC</a>. All rights reserved.
+        </p>
+    </div>
+</footer>
+
+<script>
+    var ros = new ROSLIB.Ros({
+        url: 'ws://192.168.12.197:9090'
+    });
+
+    ros.on('connection', function () {
+        console.log('Connected to websocket server.');
+    });
+
+    ros.on('error', function (error) {
+        console.log('Error connecting to websocket server:', error);
+    });
+
+    ros.on('close', function () {
+        console.log('Connection to websocket server closed.');
+    });
+
+    function subscribeAndDraw(topicName, canvasId) {
+        var topic = new ROSLIB.Topic({
+            ros: ros,
+            name: topicName,
+            messageType: 'sensor_msgs/CompressedImage'
+        });
+
+        var canvas = document.getElementById(canvasId);
+        var context = canvas.getContext('2d');
+
+        topic.subscribe(function (message) {
+            var imageUrl = "data:image/jpeg;base64," + message.data;
+            var image = new Image();
+            image.src = imageUrl;
+            image.onload = function () {
+                context.drawImage(image, 0, 0);
+            };
+        });
+    }
+
+    subscribeAndDraw('/dashboard/camera', 'cameraCanvas');
+    subscribeAndDraw('/dashboard/lanes', 'laneCanvas');
+    subscribeAndDraw('/dashboard/detections', 'objectCanvas');
+    subscribeAndDraw('/dashboard/gui', 'fusedOutputCanvas');
+
+    // Lane logs subscriber
+    var lanesLogTopic = new ROSLIB.Topic({
+        ros : ros,
+        name : '/dashboard/lanedet_logs',
+        messageType : 'std_msgs/String'
+    });
+
+    lanesLogTopic.subscribe(function(message) {
+        // Update the logs under the Lane Detection Output window
+        document.getElementById('lanesLog').innerHTML = message.data;
+    });
+
+    // Detection logs subscriber
+    var detectionsLogTopic = new ROSLIB.Topic({
+        ros : ros,
+        name : '/dashboard/detect_logs',
+        messageType : 'std_msgs/String'
+    });
+
+    detectionsLogTopic.subscribe(function(message) {
+        // Update the logs under the Object Detection Output window
+        document.getElementById('detectionLog').innerHTML = message.data;
+    });
+
+    // Camera logs subscriber
+    // Frame rate subscriber
+
+    var frameRateTopic = new ROSLIB.Topic({
+        ros : ros,
+        name : '/camera/framerate',
+        messageType : 'std_msgs/Float32'
+    });
+
+
+    var latestFrameRate = null;
+    var latestTimestamp = null;
+
+        // Frame timestamp subscriber
+    var frameTimestampTopic = new ROSLIB.Topic({
+        ros : ros,
+        name : '/camera/time',
+        messageType : 'std_msgs/Header'
+    });
+
+    function updateCameraLog() {
+        var cameraLogDiv = document.getElementById('cameraLog');
+        var content = "";
+
+        if (latestFrameRate !== null) {
+            content += "Frame Rate: " + latestFrameRate.toFixed(2) + " FPS";
+        }
+    
+        if (latestTimestamp !== null) {
+            content += "<br>Time stamp: " + latestTimestamp;
+        }
+
+        cameraLogDiv.innerHTML = content;
+    }
+
+
+    frameRateTopic.subscribe(function(message) {
+        // Update the latest frame rate and the cameraLog div
+        latestFrameRate = message.data;
+        updateCameraLog();
+    });
+
+
+    frameTimestampTopic.subscribe(function(message) {
+        // Update the latest timestamp and the cameraLog div
+        var secs = message.stamp.sec;
+        var nsecs = message.stamp.nanosec;
+        latestTimestamp = secs + "." + nsecs;
+        updateCameraLog();
+    });
+
+</script>
+
+</body>
+
+</html>

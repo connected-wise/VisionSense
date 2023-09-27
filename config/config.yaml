@@ -1,0 +1,45 @@
+sensors:
+    uv_camera:              true
+    zed_camera:             true
+    gps_module:             true
+
+camera:
+    ros__parameters:
+        resource:           "file:///home/cw/Videos/test_tsr.mp4" #"v4l2:///dev/video0" "csi://0" 
+        width:              1920
+        height:             1080
+        flip:               "rotate-180"
+        
+preview:
+    ros__parameters:
+        output:             "display://0"
+        width:              960
+        height:             540        
+
+detect:
+    ros__parameters:
+        model:              "detect.engine"
+        labels:             "labels_detect.txt"        
+        thresholds:
+            - 0.40          # Applied to all object classes
+            - 0.45           # Pedestrian objects
+            - 0.45          # Cyclist objects
+            - 0.6           # Vehicle-car objects
+            - 0.55           # Vehicle-bus objects
+            - 0.45           # Vehicle-truck objects
+            - 0.5           # Vehicle-train objects
+            - 0.35          # Traffic light objects            
+            - 0.55          # Traffic sign objects
+
+classify:
+    ros__parameters:
+        model:               "new_class.engine"
+        labels:              "new_labels_classify.txt"
+        thresholds:
+            - 0.30           # Traffic Light objects
+            - 0.75           # Traffic Sign objects
+
+lanedet:
+    ros__parameters:
+        model:              "lane_detect.engine"
+
