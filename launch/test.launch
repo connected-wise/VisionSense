@@ -1,0 +1,27 @@
+<launch>
+	<arg name="input" default="file:///home/cw/Videos/sumter-test4.mp4"/>
+	<arg name="input_width" default="1920"/>
+	<arg name="input_height" default="1080"/>
+	<arg name="input_codec" default="unknown"/>
+	<arg name="input_loop" default="0"/>
+	<arg name="input_latency" default="2000"/>
+	
+	<node pkg="visionconnect" exec="camera" output="screen">
+		<param name="resource" value="$(var input)"/>
+		<param name="width" value="$(var input_width)"/>
+		<param name="height" value="$(var input_height)"/>
+		<param name="codec" value="$(var input_codec)"/>
+		<param name="loop" value="$(var input_loop)"/>
+		<param name="latency" value="$(var input_latency)"/>
+	</node>
+	
+	<arg name="models" default="detect.engine"/>
+	<arg name="labels" default="labels_detect.txt"/>
+
+	<node pkg="visionconnect" exec="preview" output="screen">
+		<param name="models" value="$(var models)"/>
+		<param name="labels" value="$(var labels)"/>
+		<remap from="/preview/image_in" to="/camera/raw"/>
+	</node>
+
+</launch>

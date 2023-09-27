@@ -1,0 +1,6 @@
+g++ -std=c++17 -g -o sign_test.o classifier-test.cpp trtutil.cpp -I/usr/local/include/opencv4 -I/usr/local/cuda-11.4/include -L/usr/local/lib -L/usr/local/cuda-11.4/lib64 -lnvinfer -lnvonnxparser -lcudart -I/home/cw/vcplus/src/common/include -fpermissive $(pkg-config --cflags --libs opencv4) -lopencv_cudaarithm -lopencv_cudaimgproc -lopencv_cudawarping
+
+
+
+correct:
+g++ -std=c++17 -g -o sign_amin.o test.cpp trtutil.cpp -I/usr/local/include/opencv4 -I/usr/local/cuda-11.4/include -L/usr/local/lib -L/usr/local/cuda-11.4/lib64 -lnvinfer -lnvonnxparser -lcudart -I/home/cw-nx/autoconnect/src/common/include -fpermissive $(pkg-config --cflags --libs opencv4) -lopencv_cudaarithm -lopencv_cudaimgproc -lopencv_cudawarping
