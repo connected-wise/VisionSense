@@ -5,10 +5,10 @@ sensors:
 
 camera:
     ros__parameters:
-        resource:           "file:///home/cw/Videos/test_tsr.mp4" #"v4l2:///dev/video0" "csi://0" 
+        resource:           "file:///home/cw/Videos/miami-test.mp4" #"v4l2:///dev/video0" "csi://0" 
         width:              1920
         height:             1080
-        flip:               "rotate-180"
+        flip:               "" #"rotate-180"
         
 preview:
     ros__parameters:

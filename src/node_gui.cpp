@@ -20,8 +20,33 @@ Publisher<sensor_msgs::Image> gui_pub = NULL;
 
 // keeping trail of the track boxes
 std::unordered_map<int, std::vector<cv::Point2f>> track_history;
+std::unordered_map<int, int> frames_history;
+int frame_count = 0;
 
 #define TRACK_HISTORY true;
+
+void trackingHistoryCleanup(int frame_id)
+{
+  std::vector<int> remove_ids;
+  for (auto it = track_history.begin(); it != track_history.end();)
+  {
+    if (it->second.size() > 0)
+    {
+      if ( frame_id - frames_history[it->first] > 300)
+      {
+        remove_ids.push_back(it->first);
+      }
+    }
+    it++;
+  }
+  for (int i = 0; i < remove_ids.size(); i++)
+  {
+    track_history.erase(remove_ids[i]);
+    frames_history.erase(remove_ids[i]);
+  }
+}
+
+
 
 void updateTrackingHistory(cv::Mat& image)
 {
@@ -38,17 +63,22 @@ void updateTrackingHistory(cv::Mat& image)
       auto track_id = track_ids[i];
       cv::Point2f center(track_box.data[0] + track_box.data[2] / 2.0f, track_box.data[1] + track_box.data[3] / 2.0f);
       track_history[track_id].push_back(center);
+      frames_history[track_id] = frame_count;
+
       if (track_history[track_id].size() > 30)
       {
         track_history[track_id].erase(track_history[track_id].begin());
       }
-      for (size_t j = 0; j < track_history[track_id].size() - 1; ++j)
+      for (size_t j = 0; j < track_history[track_id].size(); j++)
       {
         // cv::line(image, track_history[track_id][j], track_history[track_id][j + 1], cv::Scalar(230, 230, 230), 2);
         cv::circle(image, track_history[track_id][j], 2, cv::Scalar(230, 230, 230), 1);
       }
     }
   }
+  trackingHistoryCleanup(frame_count);
+  frame_count ++;
+
 }
 
 void drawlane(cv::Mat& image)
