@@ -45,7 +45,7 @@ void updateTrackingHistory(cv::Mat& image)
       for (size_t j = 0; j < track_history[track_id].size() - 1; ++j)
       {
         // cv::line(image, track_history[track_id][j], track_history[track_id][j + 1], cv::Scalar(230, 230, 230), 2);
-        cv::circle(image, track_history[track_id][j], 2, cv::Scalar(230, 230, 230), 1github);
+        cv::circle(image, track_history[track_id][j], 2, cv::Scalar(230, 230, 230), 1);
       }
     }
   }
