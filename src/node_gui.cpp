@@ -25,6 +25,18 @@ int frame_count = 0;
 
 #define TRACK_HISTORY true;
 
+
+  std::vector<cv::Scalar> colors = {
+    cv::Scalar(10, 230, 240),  // pedestrian
+    cv::Scalar(230, 240, 10),  // cyclist
+    cv::Scalar(190, 150, 25),  // car
+    cv::Scalar(240, 120, 10),  // bus
+    cv::Scalar(100, 10, 240),  // truck
+    cv::Scalar(240, 130, 10),  // train
+    cv::Scalar(160, 90, 160),  // traffic light
+    cv::Scalar(120, 55, 70)    // traffic sign
+  };
+
 void trackingHistoryCleanup(int frame_id)
 {
   std::vector<int> remove_ids;
@@ -32,7 +44,7 @@ void trackingHistoryCleanup(int frame_id)
   {
     if (it->second.size() > 0)
     {
-      if ( frame_id - frames_history[it->first] > 300)
+      if (frame_id - frames_history[it->first] > 300)
       {
         remove_ids.push_back(it->first);
       }
@@ -46,9 +58,7 @@ void trackingHistoryCleanup(int frame_id)
   }
 }
 
-
-
-void updateTrackingHistory(cv::Mat& image)
+void drawTracking(cv::Mat& image, bool update_history = true)
 {
   auto boxes = track_msg->boxes;
   auto classes = track_msg->classes;
@@ -57,10 +67,10 @@ void updateTrackingHistory(cv::Mat& image)
 
   for (int i = 0; i < num_detections; i++)
   {
-    if (classes[i] == 2)  // car-vehicle objects only
+    auto track_box = boxes[i];
+    auto track_id = track_ids[i];
+    if (classes[i] == 2 && update_history)  // car-vehicle objects only
     {
-      auto track_box = boxes[i];
-      auto track_id = track_ids[i];
       cv::Point2f center(track_box.data[0] + track_box.data[2] / 2.0f, track_box.data[1] + track_box.data[3] / 2.0f);
       track_history[track_id].push_back(center);
       frames_history[track_id] = frame_count;
@@ -75,10 +85,12 @@ void updateTrackingHistory(cv::Mat& image)
         cv::circle(image, track_history[track_id][j], 2, cv::Scalar(230, 230, 230), 1);
       }
     }
+    cv::Rect_<float> bbox = cv::Rect(track_box.data[0], track_box.data[1], track_box.data[2], track_box.data[3]);
+    cv::rectangle(image, bbox, colors[(int)classes[i]], 4);
   }
-  trackingHistoryCleanup(frame_count);
-  frame_count ++;
 
+  trackingHistoryCleanup(frame_count);
+  frame_count++;
 }
 
 void drawlane(cv::Mat& image)
@@ -124,18 +136,10 @@ void drawlane(cv::Mat& image)
   }
 }
 
+
 void fuse_data()
 {
-  std::vector<cv::Scalar> colors = {
-    cv::Scalar(10, 230, 240),  // pedestrian
-    cv::Scalar(230, 240, 10),  // cyclist
-    cv::Scalar(190, 150, 25),  // car
-    cv::Scalar(240, 120, 10),  // bus
-    cv::Scalar(100, 10, 240),  // truck
-    cv::Scalar(240, 130, 10),  // train
-    cv::Scalar(160, 90, 160),  // traffic light
-    cv::Scalar(120, 55, 70)    // traffic sign
-  };
+
   cv::Mat img;
   auto img_msg = std::make_shared<sensor_msgs::msg::Image>(detect_msg->image);
 
@@ -144,8 +148,8 @@ void fuse_data()
   if (detect_msg == NULL || signs_msg == NULL || lanes_msg == NULL)
     return;
 
+  drawTracking(img);
   drawlane(img);
-  updateTrackingHistory(img);
 
   std::cout << "drawing lanes..." << std::endl;
 

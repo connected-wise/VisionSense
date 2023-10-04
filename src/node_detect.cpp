@@ -179,8 +179,10 @@ void postprocess(std::vector<float>& featureVector, const std::vector<nvinfer1::
     }
 
     // Redo box and draw for scaled down image
-    cv::Rect_<float> bbox = cv::Rect(bboxes[index].x, bboxes[index].y, bboxes[index].width, bboxes[index].height);
-    cv::rectangle(output, bbox, colors[(int)labels[index]], 4);
+
+    //moving to gui node:
+    // cv::Rect_<float> bbox = cv::Rect(bboxes[index].x, bboxes[index].y, bboxes[index].width, bboxes[index].height);
+    // cv::rectangle(output, bbox, colors[(int)labels[index]], 4);
 
     i++;
   }
