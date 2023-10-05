@@ -47,7 +47,7 @@ void trackingHistoryCleanup(int frame_id)
   {
     if (it->second.size() > 0)
     {
-      if (frame_id - frames_history[it->first] > 300)
+      if (frame_id - frames_history[it->first] > 100)
       {
         remove_ids.push_back(it->first);
       }
@@ -154,7 +154,7 @@ void fuse_data()
   drawTracking(img);
   drawlane(img);
 
-  std::cout << "drawing lanes..." << std::endl;
+  // std::cout << "drawing lanes..." << std::endl;
 
   auto boxes = detect_msg->boxes;
   auto classes = detect_msg->classes;
@@ -245,7 +245,7 @@ void fuse_data()
     else if (classes[i] == 6 && signScores[j] > 0.5 && j < signLabels.size())  // if traffic light
     {
       label = signLabels[j];
-      std::cout << "label: " << label << std::endl;
+      // std::cout << "label: " << label << std::endl;
       if (label == "red light")
       {
         // cout << "*******************red light*********" << j << std::endl;
