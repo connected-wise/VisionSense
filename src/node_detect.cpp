@@ -265,7 +265,7 @@ void run_engine(cv::Mat img)
   // std::cout << "size of output: " << featureVectors[0][0].size() << std::endl;
   const auto outputDims = engine->getOutputDims();
 
-  std::cout << "running detection engine.." << std::endl;
+  // std::cout << "running detection engine.." << std::endl;
 
   postprocess(featureVectors[0][0], outputDims, img);
 }

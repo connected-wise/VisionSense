@@ -13,7 +13,7 @@ visionconnect::msg::Detect::SharedPtr detect_msg = NULL;
 visionconnect::msg::Signs::SharedPtr signs_msg = NULL;
 visionconnect::msg::Lanes::SharedPtr lanes_msg = NULL;
 visionconnect::msg::Track::SharedPtr track_msg = NULL;
-// sensor_msgs::ImageConstPtr img_msg = NULL;
+sensor_msgs::ImageConstPtr img_msg = NULL;
 
 // Declare publishers
 Publisher<sensor_msgs::Image> gui_pub = NULL;
@@ -36,6 +36,9 @@ int frame_count = 0;
     cv::Scalar(160, 90, 160),  // traffic light
     cv::Scalar(120, 55, 70)    // traffic sign
   };
+
+  cv::Mat img;
+
 
 void trackingHistoryCleanup(int frame_id)
 {
@@ -330,7 +333,9 @@ void signs_callback(const visionconnect::msg::Signs::SharedPtr input)
 // input image subscriber callback
 void camera_callback(const sensor_msgs::ImageConstPtr input)
 {
-  // img_msg = input;
+  img_msg = input;
+
+
 }
 
 // detection overlay callback

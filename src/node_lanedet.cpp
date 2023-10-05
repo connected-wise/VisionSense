@@ -135,7 +135,7 @@ std::vector<std::vector<float>> run_engine(cv::Mat img)
         throw std::runtime_error("Unable to run inference.");
     }
 
-    std::cout << "running lane detection engine.." << std::endl;
+    // std::cout << "running lane detection engine.." << std::endl;
     return featureVectors[0];
 }
 

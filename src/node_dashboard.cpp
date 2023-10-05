@@ -71,7 +71,7 @@ void camera_callback(const sensor_msgs::ImageConstPtr input)
 void detection_callback(const visionconnect::msg::Detect::SharedPtr input)
 {
 
-    ROS_INFO("Received detection message");
+    // ROS_INFO("Received detection message");
 
     auto img_msg = std::make_shared<sensor_msgs::msg::Image>(input->image);
      

@@ -39,7 +39,7 @@ void postprocess(std::vector<std::vector<std::vector<float>>> &featureVectors, s
         int max_class = std::distance(output.begin(), std::max_element(output.begin(), output.end()));
 
          // Testing the output
-        std::cout << classes[max_class] <<" detected. Conf Score: " << output[max_class] << std::endl;
+        // std::cout << classes[max_class] <<" detected. Conf Score: " << output[max_class] << std::endl;
         
         classify_msg.labels[i] = classes[max_class]; //(detclasses[i] == 6) ? "traffic light" : "traffic sign";
         classify_msg.scores[i] = output[max_class];
@@ -97,7 +97,6 @@ std::vector<std::vector<std::vector<float>>> run_engine(std::vector<cv::Mat> ima
         throw std::runtime_error("Unable to run inference.");
     }
 
-    std::cout << "running classifier engine.." << std::endl;
     return featureVectors;
 }
 
@@ -115,7 +114,7 @@ void signs_callback(visionconnect::msg::Signs::SharedPtr input)
         cv::waitKey(1);
         images.push_back(cpu_img);
     }
-    std::cout << "running classifier callback: " << images.size() << std::endl;
+    // std::cout << "running classifier callback: " << images.size() << std::endl;
     
     if (images.size() == 0)
     {
