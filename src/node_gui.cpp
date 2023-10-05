@@ -292,7 +292,7 @@ void fuse_data()
     else if (classes[i] == 7 && signScores[j] > 0.65 && j < signLabels.size())  // if traffic sign
     {
       label = signLabels[j];
-      std::cout << "label: " << label << std::endl;
+      // std::cout << "label: " << label << std::endl;
 
       if (label != "guide sign")
       {
