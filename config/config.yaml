@@ -5,10 +5,10 @@ sensors:
 
 camera:
     ros__parameters:
-        resource:           "file:///home/cw/Videos/miami-test.mp4" #"v4l2:///dev/video0" "csi://0" 
+        resource:           "file:///home/cw/Videos/test_tsr2.mp4" #"v4l2:///dev/video0" "csi://0" 
         width:              1920
         height:             1080
-        flip:               "" #"rotate-180"
+        flip:               "rotate-180" #"" #
         
 preview:
     ros__parameters:
@@ -18,7 +18,7 @@ preview:
 
 detect:
     ros__parameters:
-        model:              "detect.engine"
+        model:              "yolov8s-detect.engine"
         labels:             "labels_detect.txt"        
         thresholds:
             - 0.40          # Applied to all object classes
@@ -33,8 +33,8 @@ detect:
 
 classify:
     ros__parameters:
-        model:               "new_class.engine"
-        labels:              "new_labels_classify.txt"
+        model:               "yolov8n-TSR.engine"
+        labels:              "labels_classify.txt"
         thresholds:
             - 0.30           # Traffic Light objects
             - 0.75           # Traffic Sign objects
@@ -42,4 +42,3 @@ classify:
 lanedet:
     ros__parameters:
         model:              "lane_detect.engine"
-
