@@ -135,7 +135,7 @@ std::vector<std::vector<float>> run_engine(cv::Mat img)
         throw std::runtime_error("Unable to run inference.");
     }
 
-    // std::cout << "running lane detection engine.." << std::endl;
+    std::cout << "running lane detection engine.." << std::endl;
     return featureVectors[0];
 }
 
@@ -185,8 +185,38 @@ void postprocess(std::vector<std::vector<float>> &output, cv::Mat &image)
     std::vector<cv::Mat> lanes;
     cv::Mat laneresult, rawimg; 
 
-    auto laneVector = output[1];
-    rawimg = cv::Mat(INPUT_H, INPUT_W, CV_32F, laneVector.data());
+    // Debug output dimensions
+    std::cout << "Output size: " << output.size() << std::endl;
+    for (size_t i = 0; i < output.size(); ++i) {
+        std::cout << "Output[" << i << "] size: " << output[i].size() << std::endl;
+    }
+    
+    // Check if we have enough outputs
+    if (output.size() < 2) {
+        ROS_ERROR("Not enough outputs from model. Expected at least 2, got %zu", output.size());
+        return;
+    }
+    
+    // The model outputs are:
+    // output[0]: lane maps with shape [1, 5, 208, 976] - flattened to 5*208*976 values
+    // output[1]: lane existence scores with shape [1, 4] - 4 values
+    auto laneMapVector = output[0];  // This contains all 5 channels of lane maps
+    auto laneExistenceVector = output[1];  // This contains 4 lane existence scores
+    
+    // Check sizes
+    size_t expected_map_size = 5 * INPUT_H * INPUT_W;  // 5 channels
+    if (laneMapVector.size() < expected_map_size) {
+        ROS_ERROR("Output[0] size mismatch. Expected %zu, got %zu", expected_map_size, laneMapVector.size());
+        return;
+    }
+    
+    if (laneExistenceVector.size() < 4) {
+        ROS_ERROR("Output[1] size mismatch. Expected 4, got %zu", laneExistenceVector.size());
+        return;
+    }
+    
+    // Create the raw image from the first channel (background)
+    rawimg = cv::Mat(INPUT_H, INPUT_W, CV_32F, laneMapVector.data());
     rawimg.convertTo(rawimg, CV_8UC1, 255.0);
     
     sensor_msgs::msg::Image raw;
@@ -195,15 +225,17 @@ void postprocess(std::vector<std::vector<float>> &output, cv::Mat &image)
 
     lanes_msg.rawimg = raw;
 
+    // Process the 4 lane channels (skip channel 0 which is background)
     for (int c = 1; c < 5; ++c) {
-        float* startPtr = &laneVector[c * INPUT_H * INPUT_W];
+        float* startPtr = &laneMapVector[c * INPUT_H * INPUT_W];
         cv::Mat lane(INPUT_H, INPUT_W, CV_32F, startPtr);
         cv::blur(lane, lane, cv::Size(11, 11));
         lanes.push_back(lane);
-        //cv::imshow("Lane" + std::to_string(c), lane);
     }
+    
     // lines data is std::vector<std::vector<std::pair<int, int>>>
-    auto lines = GetLines(lanes, output[0], 0.25);
+    // Pass the lane existence scores from output[1]
+    auto lines = GetLines(lanes, laneExistenceVector, 0.25);
     
     float scaleY = (IMAGE_H - CROP) / static_cast<float>(INPUT_H);
     float scaleX = IMAGE_W / static_cast<float>(INPUT_W);
@@ -220,7 +252,9 @@ void postprocess(std::vector<std::vector<float>> &output, cv::Mat &image)
         // Add delimiters after each lane
         lanes_msg.xs.push_back(-1);
         lanes_msg.ys.push_back(-1);
-        lanes_msg.probs[lane_index] = output[0][lane_index];
+        if (lane_index < laneExistenceVector.size()) {
+            lanes_msg.probs[lane_index] = laneExistenceVector[lane_index];
+        }
         lane_index++;
     }
     lanes_msg.num_lanes = lane_index;

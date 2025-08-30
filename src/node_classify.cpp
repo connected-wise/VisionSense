@@ -24,7 +24,7 @@ Engine *engine;
 std::vector<double> THRS;
 
 
-void postprocess(std::vector<std::vector<std::vector<float>>> &featureVectors, std::vector<float> detclasses)
+void postprocess(std::vector<std::vector<std::vector<float>>> &featureVectors, std::vector<float> /* detclasses */)
 {
     visionconnect::msg::Signs classify_msg;
 
@@ -39,7 +39,7 @@ void postprocess(std::vector<std::vector<std::vector<float>>> &featureVectors, s
         int max_class = std::distance(output.begin(), std::max_element(output.begin(), output.end()));
 
          // Testing the output
-        // std::cout << classes[max_class] <<" detected. Conf Score: " << output[max_class] << std::endl;
+        std::cout << classes[max_class] <<" detected. Conf Score: " << output[max_class] << std::endl;
         
         classify_msg.labels[i] = classes[max_class]; //(detclasses[i] == 6) ? "traffic light" : "traffic sign";
         classify_msg.scores[i] = output[max_class];
@@ -73,7 +73,7 @@ std::vector<std::vector<std::vector<float>>> run_engine(std::vector<cv::Mat> ima
     for (const auto &inputDim : inputDims)
     { // For each of the model inputs...
         std::vector<cv::cuda::GpuMat> input;
-        for (size_t j = 0; j < batch_size; ++j)
+        for (size_t j = 0; j < static_cast<size_t>(batch_size); ++j)
         { // For each element we want to add to the batch...
             cv::cuda::GpuMat gpu_img, resized;
             gpu_img.upload(images[j]);
@@ -97,6 +97,7 @@ std::vector<std::vector<std::vector<float>>> run_engine(std::vector<cv::Mat> ima
         throw std::runtime_error("Unable to run inference.");
     }
 
+    std::cout << "running classifier engine.." << std::endl;
     return featureVectors;
 }
 
@@ -105,16 +106,16 @@ void signs_callback(visionconnect::msg::Signs::SharedPtr input)
 
     std::vector<cv::Mat> images; 
 
-    for (const auto img_msg : input->images)
+    for (const auto& img_msg : input->images)
     {
         cv::Mat cpu_img;     
         auto cpu_img_msg = std::make_shared<sensor_msgs::msg::Image>(img_msg);
         convert_message_to_frame(cpu_img_msg, cpu_img);
-        cv::imshow("Classifier Test",cpu_img);
-        cv::waitKey(1);
+        //cv::imshow("Classifier Test",cpu_img);
+        //cv::waitKey(1);
         images.push_back(cpu_img);
     }
-    // std::cout << "running classifier callback: " << images.size() << std::endl;
+    std::cout << "running classifier callback: " << images.size() << std::endl;
     
     if (images.size() == 0)
     {
