@@ -80,6 +80,18 @@ def generate_launch_description():
 	)
 	ld.add_action(lanedet_node)
 
+	# ADAS (Advanced Driver Assistance System)
+	adas_node = Node(
+		package="visionconnect",
+		name="adas", 
+		executable="adas",
+		output="screen",
+		remappings=[
+			("/adas/lanes_in", "/lanedet/lanes")
+		]
+	)
+	ld.add_action(adas_node)
+
 	# dashboard 
 	dashboard_node = Node(
 		package="visionconnect",
@@ -106,8 +118,8 @@ def generate_launch_description():
 			("/gui/image_in", "/camera/raw"),
 			("/gui/detect_in", "/detect/detections"),
 			("/gui/signs_in", "/classify/signs"),
-			("/gui/track_in", "/detect/track"),
-			("/gui/lanes_in", "/lanedet/lanes")
+			("/gui/lanes_in", "/lanedet/lanes"),
+			("/gui/adas_in", "/adas/adas_alerts")
 		]
 	)
 	ld.add_action(gui_node)
@@ -122,10 +134,8 @@ def generate_launch_description():
 	# 	remappings=[
 	# 		("/preview/image_in", "/camera/raw"),
 	# 		("/preview/detect_in", "/detect/detections"),
-	# 		("/preview/signs_in", "/classify/signs"),
-	# 		("/preview/lanes_in", "/lanedet/lanes"),
-	# 		("/preview/gui_in", "/gui/fusion")
-
+	# 		("/preview/signs_in", "/detect/signs"),
+	# 		("/preview/lanes_in", "/lanedet/lanes")
 	# 	]
 	# )
 	# ld.add_action(preview_node)

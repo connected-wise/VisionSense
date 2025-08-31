@@ -71,13 +71,16 @@ template<typename T> static void __ros_declare_parameter( ros::NodeHandle& nh, c
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/image_encodings.hpp>
-#include <vision_msgs/msg/classification2_d.hpp>
+#include <vision_msgs/msg/classification.hpp>
+#include <vision_msgs/msg/detection2_d.hpp>
 #include <vision_msgs/msg/detection2_d_array.hpp>
+#include <vision_msgs/msg/object_hypothesis.hpp>
+#include <vision_msgs/msg/object_hypothesis_with_pose.hpp>
 #include <vision_msgs/msg/vision_info.hpp>
 
 namespace vision_msgs
 {
-	typedef msg::Classification2D Classification2D;
+	typedef msg::Classification Classification;
 	typedef msg::Detection2D		Detection2D;
 	typedef msg::Detection2DArray Detection2DArray;
 	typedef msg::ObjectHypothesis ObjectHypothesis;
@@ -98,6 +101,7 @@ extern std::string __node_name_;
 
 #define ROS_INFO(...)	RCUTILS_LOG_INFO_NAMED(__node_name_.c_str(), __VA_ARGS__)
 #define ROS_DEBUG(...)	RCUTILS_LOG_DEBUG_NAMED(__node_name_.c_str(), __VA_ARGS__)
+#define ROS_WARN(...)	RCUTILS_LOG_WARN_NAMED(__node_name_.c_str(), __VA_ARGS__)
 #define ROS_ERROR(...)   RCUTILS_LOG_ERROR_NAMED(__node_name_.c_str(), __VA_ARGS__)
 
 #define ROS_CREATE_NODE(name)							\

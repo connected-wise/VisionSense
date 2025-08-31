@@ -5,10 +5,19 @@ sensors:
 
 camera:
     ros__parameters:
-        resource:           "file:///home/cw/Videos/miami-test.mp4" #"v4l2:///dev/video0" "csi://0" 
+        resource:           "csi://0" #"v4l2:///dev/video0" #"csi://0" #"file:///home/cw-orin/Videos/videoplayback.mp4" #"v4l2:///dev/video0" "csi://0" 
         width:              1920
         height:             1080
-        flip:               "" #"rotate-180"
+
+stereo_camera:
+    ros__parameters:
+        device:             "/dev/video0"
+        width:              3200        # Full stereo width (both cameras)
+        height:             1300        # Height
+        y16_format:         true        # Use Y16 format for Arducam
+        use_gstreamer:      false       # Try V4L2 first, then GStreamer
+        enable_left:        true
+        enable_right:       true
         
 preview:
     ros__parameters:
@@ -25,16 +34,18 @@ detect:
             - 0.45           # Pedestrian objects
             - 0.45          # Cyclist objects
             - 0.6           # Vehicle-car objects
-            - 0.55           # Vehicle-bus objects
+            - 0.45           # Vehicle-bus objects
             - 0.45           # Vehicle-truck objects
             - 0.5           # Vehicle-train objects
-            - 0.35          # Traffic light objects            
+            - 0.40          # Traffic light objects            
             - 0.55          # Traffic sign objects
+        track_frame_rate:   30          # Frame rate for tracking
+        track_buffer:       30          # Buffer size for lost tracks
 
 classify:
     ros__parameters:
-        model:               "new_class.engine"
-        labels:              "new_labels_classify.txt"
+        model:               "classify.engine"
+        labels:              "labels_classify.txt"
         thresholds:
             - 0.30           # Traffic Light objects
             - 0.75           # Traffic Sign objects

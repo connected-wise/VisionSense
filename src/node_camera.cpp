@@ -1,6 +1,5 @@
 #include "ros_compat.h"
 #include "image_converter.h"
-#include "common.h"
 #include <jetson-utils/videoSource.h>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/header.hpp>
@@ -18,10 +17,10 @@ imageConverter* image_cvt = NULL;
 bool aquireFrame()
 {
 	//uchar3 *Frame;
-	imageConverter::PixelType* Frame = NULL;
+	imageConverter::PixelType* nextFrame = NULL;
 
 	// get the latest frame
-	if( !stream->Capture(&Frame, 50000) )
+	if( !stream->Capture(&nextFrame, 10000) )
 	{
 		ROS_ERROR("failed to capture next frame");
 		return false;
@@ -41,7 +40,7 @@ bool aquireFrame()
 		return false;
 	}
 
-	if( !image_cvt->Convert(msg, imageConverter::ROSOutputFormat, Frame) )
+	if( !image_cvt->Convert(msg, imageConverter::ROSOutputFormat, nextFrame) )
 	{
 		ROS_ERROR("failed to convert video stream frame to sensor_msgs::Image");
 		return false;

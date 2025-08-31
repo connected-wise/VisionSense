@@ -2,7 +2,6 @@
 #include <iostream>
 #include <fstream>
 #include "trtutil.h"
-#include <filesystem>
 #include <opencv2/cudaimgproc.hpp>
 #include <opencv2/opencv.hpp>
 
@@ -115,27 +114,12 @@ int main(int argc, char *argv[])
     std::string engine_path, label_path;
     std::vector<cv::Mat> imagestest;
 
-    for (const auto & file : std::filesystem::directory_iterator("test")) {
-        imagestest.push_back(cv::imread(file.path()));
-        std::cout << file.path() << std::endl;
-    }
-
-    // imagestest.push_back(cv::imread("test1.jpg"));
-    // imagestest.push_back(cv::imread("test2.jpg"));
-    // imagestest.push_back(cv::imread("test3.jpg"));
-    // imagestest.push_back(cv::imread("test4.jpg"));
-    // imagestest.push_back(cv::imread("test5.jpg"));
-    // imagestest.push_back(cv::imread("test6.jpg"));
-    // imagestest.push_back(cv::imread("test7.png"));
-    // imagestest.push_back(cv::imread("test8.png"));
-    // imagestest.push_back(cv::imread("test9.jpg"));
-    // imagestest.push_back(cv::imread("test10.jpg"));
-    // imagestest.push_back(cv::imread("test11.jpg"));
-    // imagestest.push_back(cv::imread("test12.jpg"));
-    // imagestest.push_back(cv::imread("test13.jpg"));
-    // imagestest.push_back(cv::imread("test14.jpg"));
-    // imagestest.push_back(cv::imread("test15.jpg"));
-    // imagestest.push_back(cv::imread("test16.jpg"));  
+    imagestest.push_back(cv::imread("test1.jpg"));
+    imagestest.push_back(cv::imread("test2.jpg"));
+    imagestest.push_back(cv::imread("test3.jpg"));
+    imagestest.push_back(cv::imread("test4.jpg"));
+    imagestest.push_back(cv::imread("test5.jpg"));
+    imagestest.push_back(cv::imread("test6.jpg"));
 
     engine_path = "classify.engine";
     label_path = "labels_classify.txt";
