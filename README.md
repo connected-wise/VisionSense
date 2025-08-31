@@ -1,4 +1,4 @@
-# VisionConnect-Plus
+# VisionSense
 
 A ROS2-based computer vision system for autonomous vehicles on NVIDIA Jetson platforms with JetPack 6.2.
 
