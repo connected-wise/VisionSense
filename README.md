@@ -2,6 +2,11 @@
 
 A ROS2-based computer vision system for autonomous vehicles on NVIDIA Jetson platforms with JetPack 6.2.
 
+https://github.com/user-attachments/assets/8b5bfc2b-9bf6-4562-895b-04ba0c5b41e3
+
+
+
+
 ## Overview
 
 VisionSense provides real-time:
