@@ -234,7 +234,13 @@ VisionSense/
 
 ## License
 
-[Your License Here]
+VisionSense is licensed for **non-commercial research and educational use only**. 
+
+✅ **Allowed:** Research, education, testing, and developing your own distinct technologies  
+❌ **Not Allowed:** Direct commercial use, integration into commercial products, or offering as a service  
+💼 **Commercial License:** Contact licensing@connectedwise.com
+
+See [LICENSE](LICENSE) for full terms.
 
 ## Contributing
 
