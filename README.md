@@ -4,7 +4,7 @@ A ROS2-based computer vision system for autonomous vehicles on NVIDIA Jetson pla
 
 ## Overview
 
-VisionConnect-Plus provides real-time:
+VisionSense provides real-time:
 - Object detection using YOLOv8 with TensorRT
 - Lane detection with neural networks
 - Traffic sign classification
@@ -89,16 +89,16 @@ sudo ldconfig
 ### 4. Install Python Dependencies
 
 ```bash
-cd /path/to/VisionConnect-Plus
+cd /path/to/VisionSense
 pip3 install -r requirements.txt
 ```
 
-## Building VisionConnect-Plus
+## Building VisionSense
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/your-repo/VisionConnect-Plus.git
-cd VisionConnect-Plus
+git clone https://github.com/your-repo/VisionSense.git
+cd VisionSense
 ```
 
 2. Source ROS2 environment:
@@ -215,7 +215,7 @@ Once running, access the dashboard at: http://localhost:8080
 ## Project Structure
 
 ```
-VisionConnect-Plus/
+VisionSense/
 ├── src/
 │   ├── nodes/          # ROS2 node implementations
 │   ├── common/         # Shared libraries and utilities
