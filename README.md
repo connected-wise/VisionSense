@@ -240,8 +240,18 @@ VisionSense is licensed for **non-commercial research and educational use only**
 ❌ **Not Allowed:** Direct commercial use, integration into commercial products, or offering as a service  
 💼 **Commercial License:** Contact licensing@connectedwise.com
 
-See [LICENSE](LICENSE) for full terms.
+See [![License: Non-Commercial](https://img.shields.io/badge/License-Non--Commercial-blue.svg)](LICENSE) for full terms.
 
 ## Contributing
 
-[Your Contributing Guidelines Here]
+We welcome research contributions! To contribute:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Commit your changes (`git commit -m 'feat: add feature'`)
+4. Push to the branch (`git push origin feature/my-feature`)
+5. Open a Pull Request
+
+Please follow existing code style, test your changes, and use [conventional commits](https://www.conventionalcommits.org/). 
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
