@@ -12,8 +12,8 @@ def generate_launch_description():
     # Declare launch arguments
     device_arg = DeclareLaunchArgument(
         'device',
-        default_value='/dev/video0',
-        description='Video device path'
+        default_value='/dev/video-stereo',
+        description='Video device path (persistent name)'
     )
     
     width_arg = DeclareLaunchArgument(

@@ -5,19 +5,31 @@ sensors:
 
 camera:
     ros__parameters:
-        resource:           "csi://0" #"v4l2:///dev/video0" #"csi://0" #"file:///home/cw-orin/Videos/videoplayback.mp4" #"v4l2:///dev/video0" "csi://0" 
-        width:              1920
-        height:             1080
+        resource:           "csi://0"   # IMX219 CSI mono camera for driver monitoring
+        width:              1280        # HD 720p resolution
+        height:             720         # HD 720p resolution
 
-stereo_camera:
+camera_stereo:
     ros__parameters:
-        device:             "/dev/video0"
-        width:              3200        # Full stereo width (both cameras)
-        height:             1300        # Height
-        y16_format:         true        # Use Y16 format for Arducam
-        use_gstreamer:      false       # Try V4L2 first, then GStreamer
-        enable_left:        true
-        enable_right:       true
+        resource:           "/dev/video1"   # Arducam stereo camera (video1)
+        width:              3840        # Full stereo width (1920 left + 1920 right)
+        height:             1200        # Stereo height
+        framerate:          30          # Frame rate
+        disparity_range:    128         # VPI disparity range (32, 64, or 128)
+        sensor_width_mm:    5.76        # Sensor width: 1920px × 3μm = 5.76mm
+        flip:               "vertical"  # Flip methods: "none", "counterclockwise", "rotate-180", "clockwise", "horizontal", "vertical", "transpose", "transverse"
+
+stereo_depth:
+    ros__parameters:
+        calibration_file:       "/home/jetson/jetson-stereo-depth/arducam_stereo/calibration.yaml"
+        min_disparity:          0
+        num_disparities:        160     # Must be divisible by 16
+        block_size:             7       # Odd number for SGBM block matching
+        uniqueness_ratio:       10      # Uniqueness constraint (5-15)
+        speckle_window_size:    100     # Max speckle size to filter
+        speckle_range:          32      # Max disparity variation in speckle
+        baseline_m:             0.1016  # Baseline distance: 101.6mm
+        focal_length_px:        1200.0  # Focal length in pixels
         
 preview:
     ros__parameters:

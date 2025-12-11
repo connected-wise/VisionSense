@@ -1,12 +1,14 @@
 #include "ros_compat.h"
 #include "image_converter.h"
 #include <jetson-utils/videoSource.h>
+#include <jetson-utils/cudaMappedMemory.h>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/header.hpp>
+#include <opencv2/opencv.hpp>
 //#include <common.h>
 
 
-// globals	
+// globals
 videoSource* stream = NULL;
 Publisher<sensor_msgs::Image> image_pub = NULL;
 Publisher<std_msgs::msg::Float32> framerate_pub = NULL;
@@ -16,7 +18,6 @@ imageConverter* image_cvt = NULL;
 // aquire and publish camera frame
 bool aquireFrame()
 {
-	//uchar3 *Frame;
 	imageConverter::PixelType* nextFrame = NULL;
 
 	// get the latest frame
@@ -30,8 +31,6 @@ bool aquireFrame()
 	sensor_msgs::Image msg;
 	std_msgs::msg::Header time;
 	std_msgs::msg::Float32 frate;
-	//cv::Mat img(stream->GetHeight(), stream->GetWidth(), CV_8UC3, Frame);
-	//convert_frame_to_message(img, msg);
 
 	// assure correct image size
 	if( !image_cvt->Resize(stream->GetWidth(), stream->GetHeight(), imageConverter::ROSOutputFormat) )
@@ -54,8 +53,7 @@ bool aquireFrame()
 	image_pub->publish(msg);
 	framerate_pub->publish(frate);
 	timestamp_pub->publish(time);
-	//ROS_INFO("published %ux%u video frame", stream->GetWidth(), stream->GetHeight());
-	
+
 	return true;
 }
 

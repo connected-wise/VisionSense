@@ -8,16 +8,34 @@
 #include "visionconnect/msg/lanes.hpp"
 #include "visionconnect/msg/adas.hpp"
 #include "visionconnect/msg/scene_data.hpp"
+#include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/nav_sat_fix.hpp>
+#include <sensor_msgs/msg/nav_sat_status.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <numeric>
 
 visionconnect::msg::Detect::SharedPtr detect_msg = NULL;
 visionconnect::msg::Signs::SharedPtr signs_msg = NULL;
 visionconnect::msg::Lanes::SharedPtr lanes_msg = NULL;
 visionconnect::msg::ADAS::SharedPtr adas_msg = NULL;
+
+// Additional data streams for enhanced GUI
+cv::Mat driver_monitor_image;
+cv::Mat stereo_depth_image;
+cv::Mat stereo_depth_image_cached;  // Cached disparity image to use when new data isn't ready
+std::mutex depth_mutex;             // Protect disparity image updates
+std::string driver_state = "UNKNOWN";
+double accel_x = 0.0, accel_y = 0.0, accel_z = 0.0;
+double gyro_x = 0.0, gyro_y = 0.0, gyro_z = 0.0;
+double latitude = 0.0, longitude = 0.0, altitude = 0.0;
+int gps_satellites = 0;
+std::string gps_fix_status = "NO FIX";
+int disparity_skip_frames = 0;     // Skip depth processing every N frames to reduce blocking
 
 // Declare publishers
 Publisher<sensor_msgs::Image> gui_pub = NULL;
@@ -40,6 +58,252 @@ std::string quadrant_v23 = "None";
 bool lane_region_1_available = false;  // Left lane region (between lines 0-1)
 bool lane_region_2_available = false;  // Center lane region (between lines 1-2)
 bool lane_region_3_available = false;  // Right lane region (between lines 2-3)
+
+// Helper function to convert depth image to colorized visualization
+cv::Mat depthToColormap(const cv::Mat& depth_float)
+{
+    if (depth_float.empty()) {
+        return cv::Mat(360, 640, CV_8UC3, cv::Scalar(20, 20, 20));
+    }
+
+    cv::Mat depth_normalized;
+    double min_val, max_val;
+    cv::minMaxLoc(depth_float, &min_val, &max_val);
+
+    if (max_val > min_val) {
+        depth_float.convertTo(depth_normalized, CV_8U,
+            255.0 / (max_val - min_val), -min_val * 255.0 / (max_val - min_val));
+    } else {
+        depth_normalized = cv::Mat::zeros(depth_float.size(), CV_8U);
+    }
+
+    cv::Mat depth_color;
+    cv::applyColorMap(depth_normalized, depth_color, cv::COLORMAP_JET);
+
+    return depth_color;
+}
+
+// Helper function to create data summary panel
+cv::Mat createSummaryPanel(int width, int height)
+{
+    cv::Mat panel(height, width, CV_8UC3, cv::Scalar(30, 30, 30));
+
+    int margin = 20;
+    int col_width = width / 4;
+    int line_height = 30;
+    int y = margin + 20;
+
+    cv::Scalar title_color(255, 200, 0);
+    cv::Scalar data_color(255, 255, 255);
+    cv::Scalar alert_color(0, 255, 0);
+    cv::Scalar warn_color(0, 165, 255);
+    cv::Scalar danger_color(0, 0, 255);
+
+    // Title
+    cv::putText(panel, "SYSTEM STATUS", cv::Point(margin, y),
+                cv::FONT_HERSHEY_SIMPLEX, 0.8, title_color, 2);
+    y += line_height;
+
+    // Column 1: Detections
+    int col1_x = margin;
+    int col1_y = y;
+    cv::putText(panel, "DETECTIONS", cv::Point(col1_x, col1_y),
+                cv::FONT_HERSHEY_SIMPLEX, 0.6, title_color, 1);
+    col1_y += line_height;
+
+    // Count detections from detect_msg
+    int num_vehicles = 0, num_pedestrians = 0, num_cyclists = 0;
+    if (detect_msg != NULL) {
+        for (uint16_t i = 0; i < detect_msg->num_detections; ++i) {
+            int cls = static_cast<int>(detect_msg->classes[i]);
+            if (cls == 2 || cls == 3 || cls == 4) num_vehicles++;
+            else if (cls == 0) num_pedestrians++;
+            else if (cls == 1) num_cyclists++;
+        }
+    }
+
+    char text[128];
+    snprintf(text, sizeof(text), "Vehicles: %d", num_vehicles);
+    cv::putText(panel, text, cv::Point(col1_x, col1_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col1_y += line_height;
+
+    snprintf(text, sizeof(text), "Pedestrians: %d", num_pedestrians);
+    cv::putText(panel, text, cv::Point(col1_x, col1_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col1_y += line_height;
+
+    snprintf(text, sizeof(text), "Cyclists: %d", num_cyclists);
+    cv::putText(panel, text, cv::Point(col1_x, col1_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col1_y += line_height;
+
+    int num_lanes = (lanes_msg != NULL) ? lanes_msg->num_lanes : 0;
+    snprintf(text, sizeof(text), "Lane Lines: %d", num_lanes);
+    cv::putText(panel, text, cv::Point(col1_x, col1_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+
+    // Column 2: Traffic Signs
+    int col2_x = col1_x + col_width;
+    int col2_y = y;
+    cv::putText(panel, "TRAFFIC SIGNS", cv::Point(col2_x, col2_y),
+                cv::FONT_HERSHEY_SIMPLEX, 0.6, title_color, 1);
+    col2_y += line_height;
+
+    int num_signs = (signs_msg != NULL) ? signs_msg->labels.size() : 0;
+    snprintf(text, sizeof(text), "Total Signs: %d", num_signs);
+    cv::putText(panel, text, cv::Point(col2_x, col2_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col2_y += line_height;
+
+    // Show sign classifications
+    if (signs_msg != NULL && !signs_msg->labels.empty()) {
+        std::map<std::string, int> sign_counts;
+        for (const auto& label : signs_msg->labels) {
+            sign_counts[label]++;
+        }
+        for (const auto& sign : sign_counts) {
+            if (col2_y > height - margin) break;
+            snprintf(text, sizeof(text), "%s: %d", sign.first.c_str(), sign.second);
+            cv::putText(panel, text, cv::Point(col2_x, col2_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
+            col2_y += line_height;
+        }
+    }
+
+    // Column 3: Driver & IMU
+    int col3_x = col2_x + col_width;
+    int col3_y = y;
+    cv::putText(panel, "DRIVER STATE", cv::Point(col3_x, col3_y),
+                cv::FONT_HERSHEY_SIMPLEX, 0.6, title_color, 1);
+    col3_y += line_height;
+
+    // Driver state with color coding
+    cv::Scalar state_color = data_color;
+    if (driver_state == "DROWSY" || driver_state == "NO_DRIVER") {
+        state_color = danger_color;
+    } else if (driver_state == "DISTRACTED") {
+        state_color = warn_color;
+    } else if (driver_state == "ALERT") {
+        state_color = alert_color;
+    }
+
+    cv::putText(panel, driver_state, cv::Point(col3_x, col3_y),
+                cv::FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2);
+    col3_y += line_height * 2;
+
+    // IMU data
+    cv::putText(panel, "IMU (m/s^2)", cv::Point(col3_x, col3_y),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, title_color, 1);
+    col3_y += line_height;
+
+    snprintf(text, sizeof(text), "X:%.2f Y:%.2f Z:%.2f", accel_x, accel_y, accel_z);
+    cv::putText(panel, text, cv::Point(col3_x, col3_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
+
+    // Column 4: GPS
+    int col4_x = col3_x + col_width;
+    int col4_y = y;
+    cv::putText(panel, "GPS/GNSS", cv::Point(col4_x, col4_y),
+                cv::FONT_HERSHEY_SIMPLEX, 0.6, title_color, 1);
+    col4_y += line_height;
+
+    cv::Scalar fix_color = (gps_satellites > 0) ? alert_color : danger_color;
+    snprintf(text, sizeof(text), "Fix: %s", gps_fix_status.c_str());
+    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, fix_color, 1);
+    col4_y += line_height;
+
+    snprintf(text, sizeof(text), "Sats: %d", gps_satellites);
+    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col4_y += line_height;
+
+    snprintf(text, sizeof(text), "Lat: %.6f", latitude);
+    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
+    col4_y += line_height;
+
+    snprintf(text, sizeof(text), "Lon: %.6f", longitude);
+    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
+    col4_y += line_height;
+
+    snprintf(text, sizeof(text), "Alt: %.1fm", altitude);
+    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
+
+    return panel;
+}
+
+// Helper function to create composite display
+cv::Mat createCompositeDisplay(const cv::Mat& main_fused, int screen_width, int screen_height)
+{
+    // Calculate adaptive layout dimensions
+    int main_width = (screen_width * 2) / 3;      // 1280 for 1920px
+    int main_height = (screen_height * 2) / 3;    // 720 for 1080px
+    int side_width = screen_width / 3;             // 640 for 1920px
+    int side_height = main_height / 2;             // 360 for 720px
+    int summary_height = screen_height - main_height; // 360 for 1080px
+
+    // Create output canvas
+    cv::Mat composite(screen_height, screen_width, CV_8UC3, cv::Scalar(0, 0, 0));
+
+    // Scale and place main view (2x from 640x360)
+    cv::Mat main_scaled;
+    cv::resize(main_fused, main_scaled, cv::Size(main_width, main_height));
+    main_scaled.copyTo(composite(cv::Rect(0, 0, main_width, main_height)));
+
+    // Add label for main view
+    cv::putText(composite, "MAIN VIEW", cv::Point(10, 25),
+                cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
+
+    // Scale and place driver monitor (top-right)
+    cv::Mat driver_display;
+    if (!driver_monitor_image.empty()) {
+        cv::resize(driver_monitor_image, driver_display, cv::Size(side_width, side_height));
+    } else {
+        driver_display = cv::Mat(side_height, side_width, CV_8UC3, cv::Scalar(40, 40, 40));
+        cv::putText(driver_display, "Driver Monitor", cv::Point(side_width/2 - 80, side_height/2),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(150, 150, 150), 1);
+        cv::putText(driver_display, "No Data", cv::Point(side_width/2 - 40, side_height/2 + 25),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(100, 100, 100), 1);
+    }
+    driver_display.copyTo(composite(cv::Rect(main_width, 0, side_width, side_height)));
+    cv::putText(composite, "DRIVER MONITOR", cv::Point(main_width + 10, 25),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
+
+    // Scale and place depth view (middle-right)
+    // Use try_lock to avoid blocking - use cached depth if new data isn't immediately available
+    cv::Mat depth_display;
+    cv::Mat depth_to_display;
+
+    // Try to get the latest cached disparity without blocking
+    if (depth_mutex.try_lock()) {
+        depth_to_display = stereo_depth_image_cached.clone();
+        depth_mutex.unlock();
+    } else {
+        // If lock fails (disparity callback is updating), use the already-displayed version
+        depth_to_display = stereo_depth_image;
+    }
+
+    // Skip updating disparity colorization every N frames to reduce GPU load
+    disparity_skip_frames++;
+    if (disparity_skip_frames >= 3) {  // Update disparity display every 3 frames (~30fps if display is ~90fps)
+        if (!depth_to_display.empty()) {
+            stereo_depth_image = depth_to_display;  // Update main display version
+        }
+        disparity_skip_frames = 0;
+    }
+
+    if (!stereo_depth_image.empty()) {
+        cv::Mat depth_color = depthToColormap(stereo_depth_image);
+        cv::resize(depth_color, depth_display, cv::Size(side_width, side_height));
+    } else {
+        depth_display = cv::Mat(side_height, side_width, CV_8UC3, cv::Scalar(40, 40, 40));
+        cv::putText(depth_display, "Stereo Depth", cv::Point(side_width/2 - 70, side_height/2),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(150, 150, 150), 1);
+        cv::putText(depth_display, "No Data", cv::Point(side_width/2 - 40, side_height/2 + 25),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(100, 100, 100), 1);
+    }
+    depth_display.copyTo(composite(cv::Rect(main_width, side_height, side_width, side_height)));
+    cv::putText(composite, "STEREO DEPTH", cv::Point(main_width + 10, side_height + 25),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
+
+    // Create and place summary panel (bottom)
+    cv::Mat summary = createSummaryPanel(screen_width, summary_height);
+    summary.copyTo(composite(cv::Rect(0, main_height, screen_width, summary_height)));
+
+    return composite;
+}
 
 void drawlane(cv::Mat &image)
 {
@@ -779,14 +1043,33 @@ void fuse_data()
     // Publish scene data
     publishSceneData();
 
+    // Create composite display with adaptive layout
+    cv::Mat composite = createCompositeDisplay(img, 1920, 1080);
+
     sensor_msgs::msg::Image msg;
     msg.header.stamp = ROS_TIME_NOW();
-    // Convert output image to ROS message
-    convert_frame_to_message(img, msg);
+    // Convert composite image to ROS message
+    convert_frame_to_message(composite, msg);
     gui_pub->publish(msg);
 
-    cv::resize(img, img, cv::Size(1920, 1080));
-    cv::imshow("Perception Fusion", img);
+    // Stretch image to fill fullscreen display (no letterboxing)
+    // Get screen dimensions from environment or use common resolutions
+    cv::Mat display_image = composite;
+    int display_width = 1920;
+    int display_height = 1080;
+
+    // Check for environment variable or detect from display
+    const char* width_env = std::getenv("DISPLAY_WIDTH");
+    const char* height_env = std::getenv("DISPLAY_HEIGHT");
+    if (width_env) display_width = std::atoi(width_env);
+    if (height_env) display_height = std::atoi(height_env);
+
+    // Stretch composite image to fill screen (ignores aspect ratio for full coverage)
+    if (composite.cols != display_width || composite.rows != display_height) {
+        cv::resize(composite, display_image, cv::Size(display_width, display_height), 0, 0, cv::INTER_LINEAR);
+    }
+
+    cv::imshow("Perception Fusion", display_image);
     cv::waitKey(1);
 }
 
@@ -819,8 +1102,148 @@ void lanes_callback(const visionconnect::msg::Lanes::SharedPtr input)
 void adas_callback(const visionconnect::msg::ADAS::SharedPtr input)
 {
     adas_msg = input;
-    ROS_INFO("ADAS message received: left=%d, right=%d, offset=%.2f", 
+    ROS_INFO("ADAS message received: left=%d, right=%d, offset=%.2f",
              adas_msg->lane_change_left, adas_msg->lane_change_right, adas_msg->lane_center_offset);
+}
+
+// Driver monitor image callback
+void driver_monitor_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+{
+    static bool first_call = true;
+    // Convert ROS Image to OpenCV Mat
+    if (msg->encoding == "rgb8") {
+        cv::Mat rgb_image(msg->height, msg->width, CV_8UC3,
+                         const_cast<uint8_t*>(msg->data.data()), msg->step);
+        cv::cvtColor(rgb_image, driver_monitor_image, cv::COLOR_RGB2BGR);
+    } else if (msg->encoding == "bgr8") {
+        driver_monitor_image = cv::Mat(msg->height, msg->width, CV_8UC3,
+                                       const_cast<uint8_t*>(msg->data.data()), msg->step).clone();
+    }
+    if (first_call) {
+        ROS_INFO("Driver monitor callback triggered: %dx%d %s", msg->width, msg->height, msg->encoding.c_str());
+        first_call = false;
+    }
+}
+
+// Driver state callback
+void driver_state_callback(const std_msgs::msg::String::SharedPtr msg)
+{
+    static bool first_call = true;
+    driver_state = msg->data;
+    if (first_call) {
+        ROS_INFO("Driver state callback triggered: %s", driver_state.c_str());
+        first_call = false;
+    }
+}
+
+// Stereo depth callback
+void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+{
+    static bool first_call = true;
+    cv::Mat temp_depth;
+
+    // Convert depth image to OpenCV Mat (quick conversion, minimal blocking)
+    if (msg->encoding == "32FC1") {
+        temp_depth = cv::Mat(msg->height, msg->width, CV_32FC1,
+                             const_cast<uint8_t*>(msg->data.data()), msg->step).clone();
+        if (first_call) {
+            ROS_INFO("Depth callback triggered: %dx%d %s", msg->width, msg->height, msg->encoding.c_str());
+            first_call = false;
+        }
+    } else if (msg->encoding == "16UC1") {
+        // Handle 16-bit unsigned depth
+        cv::Mat depth_16u(msg->height, msg->width, CV_16UC1,
+                         const_cast<uint8_t*>(msg->data.data()), msg->step);
+        depth_16u.convertTo(temp_depth, CV_32FC1, 1.0/1000.0);  // Convert to meters
+        if (first_call) {
+            ROS_INFO("Depth callback triggered (16UC1): %dx%d", msg->width, msg->height);
+            first_call = false;
+        }
+    } else if (msg->encoding == "mono8") {
+        // Handle 8-bit normalized disparity from stereo_depth node
+        cv::Mat disp_8u(msg->height, msg->width, CV_8UC1,
+                       const_cast<uint8_t*>(msg->data.data()), msg->step);
+        disp_8u.convertTo(temp_depth, CV_32FC1, 1.0);  // Convert to float (disparity values 0-255)
+        if (first_call) {
+            ROS_INFO("Depth callback triggered (mono8 disparity): %dx%d", msg->width, msg->height);
+            first_call = false;
+        }
+    } else {
+        if (first_call) {
+            ROS_WARN("Unsupported depth encoding: %s", msg->encoding.c_str());
+            first_call = false;
+        }
+        return;
+    }
+
+    // Update cached disparity in thread-safe manner (very fast operation)
+    {
+        std::lock_guard<std::mutex> lock(depth_mutex);
+        stereo_depth_image_cached = temp_depth;
+    }
+}
+
+// IMU callback
+void imu_callback(const sensor_msgs::msg::Imu::SharedPtr msg)
+{
+    static bool first_call = true;
+    static int callback_count = 0;
+
+    accel_x = msg->linear_acceleration.x;
+    accel_y = msg->linear_acceleration.y;
+    accel_z = msg->linear_acceleration.z;
+    gyro_x = msg->angular_velocity.x;
+    gyro_y = msg->angular_velocity.y;
+    gyro_z = msg->angular_velocity.z;
+
+    if (first_call) {
+        ROS_INFO("IMU callback triggered: accel=%.2f,%.2f,%.2f gyro=%.4f,%.4f,%.4f",
+                 accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+        first_call = false;
+    }
+
+    // Log every 50 callbacks
+    if (callback_count++ % 50 == 0) {
+        ROS_INFO("IMU Update - Accel: [%.2f, %.2f, %.2f] m/s² | Gyro: [%.4f, %.4f, %.4f] rad/s",
+                 accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+    }
+}
+
+// GPS callback
+void gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
+{
+    static bool first_call = true;
+    static int callback_count = 0;
+
+    latitude = msg->latitude;
+    longitude = msg->longitude;
+    altitude = msg->altitude;
+
+    // Determine fix status
+    if (msg->status.status == sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX) {
+        gps_fix_status = "NO FIX";
+        gps_satellites = 0;
+    } else if (msg->status.status == sensor_msgs::msg::NavSatStatus::STATUS_FIX) {
+        gps_fix_status = "3D FIX";
+        gps_satellites = 4;  // Minimum for 3D fix
+    } else if (msg->status.status == sensor_msgs::msg::NavSatStatus::STATUS_SBAS_FIX) {
+        gps_fix_status = "SBAS FIX";
+        gps_satellites = 6;
+    } else if (msg->status.status == sensor_msgs::msg::NavSatStatus::STATUS_GBAS_FIX) {
+        gps_fix_status = "GBAS FIX";
+        gps_satellites = 8;
+    }
+
+    if (first_call) {
+        ROS_INFO("GPS callback triggered: lat=%.6f lon=%.6f alt=%.1f status=%s",
+                 latitude, longitude, altitude, gps_fix_status.c_str());
+        first_call = false;
+    }
+
+    if (callback_count++ % 50 == 0) {
+        ROS_INFO("GPS Update - Lat: %.6f | Lon: %.6f | Alt: %.1f | Status: %s",
+                 latitude, longitude, altitude, gps_fix_status.c_str());
+    }
 }
 
 // node main loop
@@ -836,6 +1259,13 @@ int main(int argc, char **argv)
     auto signs_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Signs, "signs_in", 1, signs_callback);
     auto lanes_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Lanes, "lanes_in", 1, lanes_callback);
     auto adas_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::ADAS, "adas_in", 1, adas_callback);
+
+    // Subscribe to additional data streams for enhanced GUI
+    auto driver_monitor_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "/driver_monitor/image", 2, driver_monitor_callback);
+    auto driver_state_sub = ROS_CREATE_SUBSCRIBER(std_msgs::msg::String, "/driver_monitor/state", 2, driver_state_callback);
+    auto depth_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "/stereo_depth/disparity", 2, depth_callback);
+    auto imu_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::Imu, "/imu_gps/imu/data", 2, imu_callback);
+    auto gps_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::NavSatFix, "/imu_gps/gps/fix", 2, gps_callback);
 
     ROS_CREATE_PUBLISHER(sensor_msgs::Image, "fusion", 5, gui_pub);
     ROS_CREATE_PUBLISHER(visionconnect::msg::SceneData, "scene_data", 10, scene_pub);

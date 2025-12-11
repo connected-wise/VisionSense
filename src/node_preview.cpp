@@ -8,10 +8,12 @@
 #include "visionconnect/msg/lanes.hpp"
 #include "image_converter.h"
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <opencv2/opencv.hpp>
 
 videoOutput* stream1 = NULL;
 videoOutput* stream2 = NULL;
 videoOutput* stream3 = NULL;
+videoOutput* stream4 = NULL;
 imageConverter* image_cvt = NULL;
 int display_w, display_h;
 
@@ -64,15 +66,32 @@ void lanes_callback(const visionconnect::msg::Lanes::SharedPtr input)
     ROS_INFO("Received detection message");
 
     auto img_msg = std::make_shared<sensor_msgs::msg::Image>(input->laneimg);
-     
+
     // convert the image to reside on GPU
 	if( !image_cvt || !image_cvt->Convert(img_msg))
 	{
 		ROS_INFO("failed to convert %ux%u %s image", img_msg->width, img_msg->height, img_msg->encoding.c_str());
-		return;	
+		return;
 	}
 
     stream3->Render(image_cvt->ImageGPU(), image_cvt->GetWidth(), image_cvt->GetHeight());
+}
+
+// disparity viewer callback
+void disparity_callback(const sensor_msgs::ImageConstPtr input)
+{
+    ROS_INFO("Received disparity image: %ux%u %s", input->width, input->height, input->encoding.c_str());
+
+    // convert the image to reside on GPU
+	if( !image_cvt || !image_cvt->Convert(input) )
+	{
+		ROS_INFO("failed to convert %ux%u %s image", input->width, input->height, input->encoding.c_str());
+		return;
+	}
+
+    // render the disparity image
+	stream4->Render(image_cvt->ImageGPU(), image_cvt->GetWidth(), image_cvt->GetHeight());
+    ROS_INFO("Rendered disparity to stream4");
 }
 
 // node main loop
@@ -96,9 +115,10 @@ int main(int argc, char **argv)
 
     stream1 = videoOutput::Create(output.c_str());
     stream2 = videoOutput::Create(output.c_str());
-    stream3 = videoOutput::Create(output.c_str());  
+    stream3 = videoOutput::Create(output.c_str());
+    stream4 = videoOutput::Create(output.c_str());
 
-    if (!stream1 || !stream2 || !stream3)
+    if (!stream1 || !stream2 || !stream3 || !stream4)
 	{
 		ROS_ERROR("failed to open video output");
 		return 0;
@@ -110,6 +130,7 @@ int main(int argc, char **argv)
     auto detect_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Detect, "detect_in", 1, detection_callback);
     auto signs_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Signs, "signs_in", 1, signs_callback);
     auto lanes_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Lanes, "lanes_in", 1, lanes_callback);
+    auto disparity_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "disparity_in", 1, disparity_callback);
 
 	// start publishing video frames
     ROS_INFO("Preview Node initialized, waiting for images");
@@ -119,6 +140,7 @@ int main(int argc, char **argv)
 	delete stream1;
     delete stream2;
     delete stream3;
+    delete stream4;
 	delete image_cvt;
 
     return 0;
