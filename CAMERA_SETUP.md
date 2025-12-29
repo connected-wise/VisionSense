@@ -5,13 +5,13 @@
 VisionSense uses two cameras with guaranteed persistent device assignments:
 
 1. **Mono Camera (Driver Monitoring)**: IMX219 camera at I2C address 10-0010
-   - Device: **ALWAYS `/dev/video0`** (guaranteed by udev rules)
+   - Device: `/dev/video0` (V4L2) / `csi://0` (Argus/jetson-utils)
    - Symlink: `/dev/video-mono` → `/dev/video0`
-   - Resolution: 1920x1200
+   - Resolution: 1920x1080 (also supports 1640x1232, 3280x2464)
    - Purpose: Driver monitoring and interior cabin view
 
 2. **Stereo Camera (Depth Perception)**: Arducam stereo camera at I2C address 9-000c
-   - Device: **ALWAYS `/dev/video1`** (guaranteed by udev rules)
+   - Device: `/dev/video1` (V4L2 only, not Argus-compatible)
    - Symlink: `/dev/video-stereo` → `/dev/video1`
    - Resolution: 3840x1200 (side-by-side stereo: 1920x1200 per eye)
    - Purpose: Depth estimation and 3D scene understanding
@@ -33,8 +33,8 @@ SUBSYSTEM=="video4linux", ATTR{name}=="vi-output, arducam-csi2 9-000c", SYMLINK+
 ### How It Works
 
 The udev rules identify cameras by their hardware names (which include I2C addresses):
-- IMX219 at I2C 0x10 → identified as "imx219 10-0010" → assigned `/dev/video0`
-- Arducam at I2C 0x0c → identified as "arducam-csi2 9-000c" → assigned `/dev/video1`
+- IMX219 at I2C 0x10 → identified as "imx219 10-0010" → `/dev/video0` (V4L2) / `csi://0` (Argus)
+- Arducam at I2C 0x0c → identified as "arducam-csi2 9-000c" → `/dev/video1` (V4L2 only)
 
 The rules also create convenient symlinks (`/dev/video-mono` and `/dev/video-stereo`) for reference, though the actual configuration uses the numbered devices for compatibility with jetson-utils.
 
@@ -45,18 +45,18 @@ The rules also create convenient symlinks (`/dev/video-mono` and `/dev/video-ste
 ```yaml
 camera:
     ros__parameters:
-        resource: "v4l2:///dev/video0"  # IMX219 mono camera - guaranteed by udev
+        resource: "csi://0"  # IMX219 mono camera - uses Argus/nvarguscamerasrc
         width: 1920
-        height: 1200
+        height: 1080
 
 camera_stereo:
     ros__parameters:
-        resource: "v4l2:///dev/video1"  # Arducam stereo camera - guaranteed by udev
+        resource: "/dev/video1"  # Arducam stereo camera - V4L2 only
         width: 3840
         height: 1200
 ```
 
-**Note**: The configuration uses `/dev/video0` and `/dev/video1` (not the symlinks) because jetson-utils doesn't support symbolic links. The udev rules ensure these device numbers are always assigned to the correct cameras based on their hardware identifiers.
+**Note**: The IMX219 uses `csi://0` (Argus sensor index). The Arducam stereo camera is V4L2-only and uses `/dev/video1`.
 
 ### Launch Files
 
@@ -108,4 +108,4 @@ If camera assignments change after reboot:
 - **Mono Camera (IMX219)**: Connected to CSI port with I2C address 0x10
 - **Stereo Camera (Arducam)**: Connected to CSI port with I2C address 0x0c
 
-The udev rules identify cameras by their I2C addresses and driver names, ensuring consistent mapping regardless of kernel enumeration order.
+**Important**: The Argus sensor index (`csi://0`) corresponds to the only Argus-compatible camera (IMX219). The Arducam stereo is V4L2-only and not visible to Argus.

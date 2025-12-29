@@ -32,7 +32,7 @@ def generate_launch_description():
 	with open(config_path, "r") as fp:
 		config = yaml.safe_load(fp)
 		
-	# Camera
+	# Camera (Mono) - for driver monitoring display
 	camera_node = Node(
 		package="visionconnect",
 		name="camera",
@@ -94,12 +94,13 @@ def generate_launch_description():
 	)
 	ld.add_action(adas_node)
 
-	# Driver Monitor
+	# Driver Monitor - TensorRT accelerated face detection + gaze estimation
 	driver_monitor_node = Node(
 		package="visionconnect",
 		name="driver_monitor",
 		executable="driver_monitor",
-		output="screen"
+		output="screen",
+		parameters=[config["driver_monitor"]["ros__parameters"]]
 	)
 	ld.add_action(driver_monitor_node)
 
@@ -159,6 +160,7 @@ def generate_launch_description():
 		name="gui",
 		executable="gui",
 		output="screen",
+		additional_env={"DISPLAY": ":0"},
 		remappings=[
 			("/gui/image_in", "/camera_stereo/left/image_raw"),
 			("/gui/detect_in", "/detect/detections"),

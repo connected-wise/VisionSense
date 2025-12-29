@@ -31,9 +31,15 @@ void convert_frame_to_message(
 }
 
 void convert_message_to_frame(const sensor_msgs::ImageConstPtr msg, cv::Mat &frame){
+    auto it = cv_map.find(msg->encoding);
+    if (it == cv_map.end()) {
+        std::cerr << "Unsupported image encoding: " << msg->encoding << std::endl;
+        frame = cv::Mat();  // Return empty Mat
+        return;
+    }
     cv::Mat img((uint32_t)msg->height,
                 (uint32_t)msg->width,
-                cv_map.find(msg->encoding)->second,
+                it->second,
                 (uint8_t*)msg->data.data(),
                 static_cast<uint32_t>(msg->step));
     frame = img;

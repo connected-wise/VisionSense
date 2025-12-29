@@ -102,7 +102,7 @@ std::vector<std::vector<std::pair<int, int>>> GetLines(const std::vector<cv::Mat
     return coordinates;
 }
 
-std::vector<std::vector<float>> run_engine(cv::Mat img)
+std::vector<std::vector<float>> run_engine(cv::Mat img, const std::string& encoding)
 {
     const auto &inputDims = engine->getInputDims();
     std::vector<std::vector<cv::cuda::GpuMat>> inputs;
@@ -116,7 +116,10 @@ std::vector<std::vector<float>> run_engine(cv::Mat img)
             gpu_img.upload(img);
             // cv::Rect(x, y, width, height) where x, y is the top left corner
             cv::cuda::GpuMat cropped(gpu_img, cv::Rect(0, img.rows/2, img.cols, CROP));
-            cv::cuda::cvtColor(cropped, cropped, cv::COLOR_BGR2RGB);
+            // Only convert BGR->RGB if input is BGR (skip if already RGB for better performance)
+            if (encoding == "bgr8") {
+                cv::cuda::cvtColor(cropped, cropped, cv::COLOR_BGR2RGB);
+            }
             cv::cuda::resize(cropped, resized, cv::Size(inputDim.d[2], inputDim.d[1]));
 
             input.emplace_back(std::move(resized));
@@ -135,7 +138,6 @@ std::vector<std::vector<float>> run_engine(cv::Mat img)
         throw std::runtime_error("Unable to run inference.");
     }
 
-    std::cout << "running lane detection engine.." << std::endl;
     return featureVectors[0];
 }
 
@@ -185,12 +187,6 @@ void postprocess(std::vector<std::vector<float>> &output, cv::Mat &image)
     std::vector<cv::Mat> lanes;
     cv::Mat laneresult, rawimg; 
 
-    // Debug output dimensions
-    std::cout << "Output size: " << output.size() << std::endl;
-    for (size_t i = 0; i < output.size(); ++i) {
-        std::cout << "Output[" << i << "] size: " << output[i].size() << std::endl;
-    }
-    
     // Check if we have enough outputs
     if (output.size() < 2) {
         ROS_ERROR("Not enough outputs from model. Expected at least 2, got %zu", output.size());
@@ -281,15 +277,15 @@ void img_callback(const sensor_msgs::msg::Image::SharedPtr input)
 
     IMAGE_W = img.cols;
     IMAGE_H = img.rows;
-    CROP = IMAGE_H/2; 
-	
+    CROP = IMAGE_H/2;
+
     if(img.empty())
     {
         ROS_INFO("Failed to convert the input to Opencv image");
-        return;	
+        return;
     }
 
-    auto output = run_engine(img);
+    auto output = run_engine(img, input->encoding);
     postprocess(output, img);
 }
 

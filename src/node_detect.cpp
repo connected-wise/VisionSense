@@ -28,6 +28,7 @@ std::vector<std::string> classes;
 std::vector<double> THRS;
 int track_frame_rate = 30;
 int track_buffer = 30;
+std::string current_image_encoding = "bgr8";  // Track input encoding for output
 
 // Custom tracking variables
 int frame_counter = 0;
@@ -269,6 +270,7 @@ void postprocess(std::vector<float> &featureVector, const std::vector<nvinfer1::
             sensor_msgs::msg::Image msgClassifyImg;
 
             convert_frame_to_message(img(bboxes[index]), msgClassifyImg);
+            msgClassifyImg.encoding = current_image_encoding;  // Preserve input encoding
             classifier_msg.images.push_back(msgClassifyImg);
             classifier_msg.classes.push_back(labels[index]);
             classifier_msg.scores.push_back(scores[index]);
@@ -313,8 +315,9 @@ void postprocess(std::vector<float> &featureVector, const std::vector<nvinfer1::
     sensor_msgs::msg::Image msg;
     msg.header.stamp = ROS_TIME_NOW();
 
-    // Convert output image to ROS message
+    // Convert output image to ROS message and preserve input encoding
     convert_frame_to_message(output, msg);
+    msg.encoding = current_image_encoding;  // Use same encoding as input (rgb8 or bgr8)
     detect_msg.image = msg;
 
     // Publish the messages
@@ -346,7 +349,7 @@ void load_engine(std::string path)
     }
 }
 
-void run_engine(cv::Mat img)
+void run_engine(cv::Mat img, const std::string& encoding)
 {
     //cv::imshow("detection", img);
     //cv::waitKey(1);
@@ -361,8 +364,10 @@ void run_engine(cv::Mat img)
         { // For each element we want to add to the batch...
             cv::cuda::GpuMat gpu_img, resized;
             gpu_img.upload(img);
-            // Apply if input is BGR image:
-            cv::cuda::cvtColor(gpu_img, gpu_img, cv::COLOR_BGR2RGB);
+            // Only convert BGR->RGB if input is BGR (skip if already RGB for better performance)
+            if (encoding == "bgr8") {
+                cv::cuda::cvtColor(gpu_img, gpu_img, cv::COLOR_BGR2RGB);
+            }
             resized = engine->resizeKeepAspectRatioPadRightBottom(gpu_img, inputDim.d[2], inputDim.d[1], cv::COLOR_BGR2RGB); // TRT dims are (height, width) whereas OpenCV is (width, height)
             input.emplace_back(std::move(resized));
         }
@@ -382,28 +387,25 @@ void run_engine(cv::Mat img)
         throw std::runtime_error("Unable to run inference.");
     }
 
-    // std::cout << "size of output: " << featureVectors[0][0].size() << std::endl;
     const auto outputDims = engine->getOutputDims();
-
-    std::cout << "running detection engine.." << std::endl;
-
     postprocess(featureVectors[0][0], outputDims, img);
 }
 
 // input image subscriber callback
 void img_callback(const sensor_msgs::msg::Image::SharedPtr input)
 {
-    
     cv::Mat img;
     convert_message_to_frame(input, img);
-	
+
     if(img.empty())
     {
 	ROS_INFO("Failed to convert the input to Opencv image");
-	return;	
+	return;
     }
 
-    run_engine(img);
+    // Store input encoding so output uses same encoding
+    current_image_encoding = input->encoding;
+    run_engine(img, input->encoding);
 }
 
 

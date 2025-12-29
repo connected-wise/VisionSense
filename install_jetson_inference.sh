@@ -36,6 +36,13 @@ cd jetson-inference
 mkdir -p build
 cd build
 
+# Fix npymath library issue for newer NumPy versions
+NPYMATH_PATH="/usr/lib/python3/dist-packages/numpy/core/lib/libnpymath.a"
+if [ -f "$NPYMATH_PATH" ] && [ ! -f /usr/lib/libnpymath.a ]; then
+    echo "Creating symlink for npymath library..."
+    sudo ln -sf "$NPYMATH_PATH" /usr/lib/libnpymath.a
+fi
+
 echo "Configuring build..."
 cmake ../
 

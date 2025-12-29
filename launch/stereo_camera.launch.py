@@ -10,50 +10,38 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
     # Declare launch arguments
-    device_arg = DeclareLaunchArgument(
-        'device',
-        default_value='/dev/video-stereo',
-        description='Video device path (persistent name)'
+    resource_arg = DeclareLaunchArgument(
+        'resource',
+        default_value='/dev/video1',
+        description='Video device path for Arducam stereo camera'
     )
-    
+
     width_arg = DeclareLaunchArgument(
         'width',
-        default_value='3200',
-        description='Full stereo width (both cameras)'
+        default_value='3840',
+        description='Full stereo width (1920 left + 1920 right)'
     )
-    
+
     height_arg = DeclareLaunchArgument(
         'height',
-        default_value='1300',
+        default_value='1200',
         description='Camera height'
     )
-    
-    y16_format_arg = DeclareLaunchArgument(
-        'y16_format',
-        default_value='true',
-        description='Use Y16 format (16-bit grayscale)'
-    )
-    
-    use_gstreamer_arg = DeclareLaunchArgument(
-        'use_gstreamer',
-        default_value='false',
-        description='Use GStreamer pipeline instead of V4L2'
-    )
-    
+
     # Stereo camera node
     stereo_camera_node = Node(
         package='visionconnect',
-        executable='stereo_camera',
-        name='stereo_camera',
+        executable='camera_stereo',
+        name='camera_stereo',
         output='screen',
         parameters=[{
-            'device': LaunchConfiguration('device'),
+            'resource': LaunchConfiguration('resource'),
             'width': LaunchConfiguration('width'),
             'height': LaunchConfiguration('height'),
-            'y16_format': LaunchConfiguration('y16_format'),
-            'use_gstreamer': LaunchConfiguration('use_gstreamer'),
-            'enable_left': True,
-            'enable_right': True
+            'framerate': 30,
+            'flip': 'vertical',
+            'latency': 0,       # Minimize GStreamer latency
+            'num_buffers': 4    # Keep at 4 for stability under load
         }],
         remappings=[
             ('left/image_raw', '/stereo/left/image_raw'),
@@ -88,32 +76,31 @@ def generate_launch_description():
         ]
     )
     
-    # Optional: Preview node to display stereo images
+    # Preview node to display both stereo cameras
     preview_node = Node(
         package='visionconnect',
         executable='preview',
         name='preview_stereo',
         output='screen',
+        additional_env={"DISPLAY": ":0"},
         parameters=[{
             'output': 'display://0',
             'width': 960,
             'height': 540
         }],
         remappings=[
-            ('/camera/raw', '/stereo/left/image_raw')
+            ('left/image_in', '/stereo/left/image_raw'),
+            ('right/image_in', '/stereo/right/image_raw')
         ]
     )
     
     return LaunchDescription([
-        device_arg,
+        resource_arg,
         width_arg,
         height_arg,
-        y16_format_arg,
-        use_gstreamer_arg,
         stereo_camera_node,
+        preview_node,
         # Uncomment to enable detection on both cameras
         # detect_left_node,
         # detect_right_node,
-        # Uncomment to enable preview
-        # preview_node
     ])

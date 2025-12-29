@@ -21,6 +21,9 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(OpenCV 4 REQUIRED)
+message(STATUS "OpenCV version: ${OpenCV_VERSION}")
+message(STATUS "OpenCV libraries: ${OpenCV_LIBRARIES}")
+message(STATUS "OpenCV include dirs: ${OpenCV_INCLUDE_DIRS}")
 find_package(CUDA REQUIRED)
 find_package(jetson-utils REQUIRED)
 find_package(jetson-inference REQUIRED)
@@ -36,27 +39,20 @@ find_package(rosidl_default_generators REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(message_filters REQUIRED)
-
-set(QMAKE_CXXFLAGS  "-fno-sized-deallocation")
-find_package(Qt5Core 5 REQUIRED)
-find_package(Qt5Quick 5 REQUIRED)
-find_package(Qt5Widgets 5 REQUIRED)
-find_package(Qt5Location 5 REQUIRED)
-find_package(Qt5Multimedia 5 REQUIRED)
-
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTOUIC ON)
-set(CMAKE_AUTORCC ON)
-set(CMAKE_INCLUDE_CURRENT_DIR ON)
+find_package(X11 REQUIRED)
 
 link_directories(/usr/lib/aarch64-linux-gnu/tegra)
 link_directories(/opt/nvidia/vpi2/lib64)
+
+# CUDA library for stereo rotation kernel
+cuda_add_library(stereo_rotate_cuda STATIC src/cuda/stereo_rotate.cu)
+set_target_properties(stereo_rotate_cuda PROPERTIES CUDA_ARCHITECTURES "87")
 
 # Shared library
 file(GLOB_RECURSE common_src RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} src/common/*.cpp)
 include_directories(src/common/include)
 add_library(common STATIC ${common_src})
-target_link_libraries(common ${catkin_LIBRARIES} ${OpenCV_LIBS} jetson-inference cudart)
+target_link_libraries(common ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} jetson-inference cudart)
 
 # TensorRT related files
 set(TENSORRT_LIBS jetson-inference nvinfer cudart)
@@ -92,44 +88,43 @@ include_directories(${vision_msgs_INCLUDE_DIRS})
 
 target_link_libraries(camera
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
     ${TENSORRT_LIBS}
     jetson-inference
     common
 )
 target_link_libraries(camera_stereo
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
     jetson-inference
     common
-    vpi
+    stereo_rotate_cuda
     cudart
-    nvinfer
 )
 target_link_libraries(detect
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
     ${TENSORRT_LIBS}
     jetson-inference
     common
 )
 target_link_libraries(classify
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
     ${TENSORRT_LIBS}
     jetson-inference
     common
 )
 target_link_libraries(lanedet
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
     ${TENSORRT_LIBS}
     jetson-inference
     common
 )
 target_link_libraries(preview
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
     ${TENSORRT_LIBS}
     jetson-inference
     common
@@ -137,8 +132,7 @@ target_link_libraries(preview
 
 target_link_libraries(dashboard
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
-    /usr/lib/aarch64-linux-gnu/libopencv_imgproc.so.413
+    ${OpenCV_LIBRARIES}
     ${TENSORRT_LIBS}
     jetson-inference
     common
@@ -146,15 +140,16 @@ target_link_libraries(dashboard
 
 target_link_libraries(gui
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
     ${TENSORRT_LIBS}
+    ${X11_LIBRARIES}
     jetson-inference
     common
 )
 
 target_link_libraries(adas
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
     ${TENSORRT_LIBS}
     jetson-inference
     common
@@ -162,11 +157,10 @@ target_link_libraries(adas
 
 target_link_libraries(driver_monitor
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
     common
-    opencv_face
-    opencv_objdetect
     nvinfer
+    cudart
 )
 
 target_link_libraries(imu_gps
@@ -178,7 +172,9 @@ target_link_libraries(imu_gps
 
 target_link_libraries(stereo_depth
     ${catkin_LIBRARIES}
-    ${OpenCV_LIBS}
+    ${OpenCV_LIBRARIES}
+    nvinfer
+    cudart
 )
 
 # Include custom messages

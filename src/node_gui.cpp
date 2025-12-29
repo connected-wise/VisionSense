@@ -2,6 +2,7 @@
 #include "common.h"
 #include <jetson-utils/videoOutput.h>
 #include "trtutil.h"
+#include <X11/Xlib.h>
 
 #include "visionconnect/msg/detect.hpp"
 #include "visionconnect/msg/signs.hpp"
@@ -23,6 +24,9 @@ visionconnect::msg::Detect::SharedPtr detect_msg = NULL;
 visionconnect::msg::Signs::SharedPtr signs_msg = NULL;
 visionconnect::msg::Lanes::SharedPtr lanes_msg = NULL;
 visionconnect::msg::ADAS::SharedPtr adas_msg = NULL;
+
+int screen_width = 1920;
+int screen_height = 1080;
 
 // Additional data streams for enhanced GUI
 cv::Mat driver_monitor_image;
@@ -88,10 +92,10 @@ cv::Mat createSummaryPanel(int width, int height)
 {
     cv::Mat panel(height, width, CV_8UC3, cv::Scalar(30, 30, 30));
 
-    int margin = 20;
-    int col_width = width / 4;
-    int line_height = 30;
-    int y = margin + 20;
+    int margin = 15;
+    int col_width = width / 2;
+    int line_height = 28;
+    int y = margin;
 
     cv::Scalar title_color(255, 200, 0);
     cv::Scalar data_color(255, 255, 255);
@@ -100,23 +104,23 @@ cv::Mat createSummaryPanel(int width, int height)
     cv::Scalar danger_color(0, 0, 255);
 
     // Title
-    cv::putText(panel, "SYSTEM STATUS", cv::Point(margin, y),
-                cv::FONT_HERSHEY_SIMPLEX, 0.8, title_color, 2);
-    y += line_height;
+    cv::putText(panel, "SYSTEM STATUS", cv::Point(margin, y + 20),
+                cv::FONT_HERSHEY_SIMPLEX, 0.7, title_color, 2);
+    y += 35;
 
     // Column 1: Detections
     int col1_x = margin;
     int col1_y = y;
+
     cv::putText(panel, "DETECTIONS", cv::Point(col1_x, col1_y),
-                cv::FONT_HERSHEY_SIMPLEX, 0.6, title_color, 1);
+                cv::FONT_HERSHEY_SIMPLEX, 0.55, title_color, 1);
     col1_y += line_height;
 
-    // Count detections from detect_msg
     int num_vehicles = 0, num_pedestrians = 0, num_cyclists = 0;
     if (detect_msg != NULL) {
         for (uint16_t i = 0; i < detect_msg->num_detections; ++i) {
             int cls = static_cast<int>(detect_msg->classes[i]);
-            if (cls == 2 || cls == 3 || cls == 4) num_vehicles++;
+            if (cls >= 2 && cls <= 4) num_vehicles++;
             else if (cls == 0) num_pedestrians++;
             else if (cls == 1) num_cyclists++;
         }
@@ -136,43 +140,11 @@ cv::Mat createSummaryPanel(int width, int height)
     col1_y += line_height;
 
     int num_lanes = (lanes_msg != NULL) ? lanes_msg->num_lanes : 0;
-    snprintf(text, sizeof(text), "Lane Lines: %d", num_lanes);
+    snprintf(text, sizeof(text), "Lanes: %d", num_lanes);
     cv::putText(panel, text, cv::Point(col1_x, col1_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col1_y += line_height;
 
-    // Column 2: Traffic Signs
-    int col2_x = col1_x + col_width;
-    int col2_y = y;
-    cv::putText(panel, "TRAFFIC SIGNS", cv::Point(col2_x, col2_y),
-                cv::FONT_HERSHEY_SIMPLEX, 0.6, title_color, 1);
-    col2_y += line_height;
-
-    int num_signs = (signs_msg != NULL) ? signs_msg->labels.size() : 0;
-    snprintf(text, sizeof(text), "Total Signs: %d", num_signs);
-    cv::putText(panel, text, cv::Point(col2_x, col2_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
-    col2_y += line_height;
-
-    // Show sign classifications
-    if (signs_msg != NULL && !signs_msg->labels.empty()) {
-        std::map<std::string, int> sign_counts;
-        for (const auto& label : signs_msg->labels) {
-            sign_counts[label]++;
-        }
-        for (const auto& sign : sign_counts) {
-            if (col2_y > height - margin) break;
-            snprintf(text, sizeof(text), "%s: %d", sign.first.c_str(), sign.second);
-            cv::putText(panel, text, cv::Point(col2_x, col2_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
-            col2_y += line_height;
-        }
-    }
-
-    // Column 3: Driver & IMU
-    int col3_x = col2_x + col_width;
-    int col3_y = y;
-    cv::putText(panel, "DRIVER STATE", cv::Point(col3_x, col3_y),
-                cv::FONT_HERSHEY_SIMPLEX, 0.6, title_color, 1);
-    col3_y += line_height;
-
-    // Driver state with color coding
+    // Driver state
     cv::Scalar state_color = data_color;
     if (driver_state == "DROWSY" || driver_state == "NO_DRIVER") {
         state_color = danger_color;
@@ -181,45 +153,36 @@ cv::Mat createSummaryPanel(int width, int height)
     } else if (driver_state == "ALERT") {
         state_color = alert_color;
     }
+    snprintf(text, sizeof(text), "Driver: %s", driver_state.c_str());
+    cv::putText(panel, text, cv::Point(col1_x, col1_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, state_color, 1);
 
-    cv::putText(panel, driver_state, cv::Point(col3_x, col3_y),
-                cv::FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2);
-    col3_y += line_height * 2;
+    // Column 2: GPS & IMU
+    int col2_x = col1_x + col_width;
+    int col2_y = y;
 
-    // IMU data
-    cv::putText(panel, "IMU (m/s^2)", cv::Point(col3_x, col3_y),
-                cv::FONT_HERSHEY_SIMPLEX, 0.5, title_color, 1);
-    col3_y += line_height;
-
-    snprintf(text, sizeof(text), "X:%.2f Y:%.2f Z:%.2f", accel_x, accel_y, accel_z);
-    cv::putText(panel, text, cv::Point(col3_x, col3_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
-
-    // Column 4: GPS
-    int col4_x = col3_x + col_width;
-    int col4_y = y;
-    cv::putText(panel, "GPS/GNSS", cv::Point(col4_x, col4_y),
-                cv::FONT_HERSHEY_SIMPLEX, 0.6, title_color, 1);
-    col4_y += line_height;
+    cv::putText(panel, "GPS / IMU", cv::Point(col2_x, col2_y),
+                cv::FONT_HERSHEY_SIMPLEX, 0.55, title_color, 1);
+    col2_y += line_height;
 
     cv::Scalar fix_color = (gps_satellites > 0) ? alert_color : danger_color;
-    snprintf(text, sizeof(text), "Fix: %s", gps_fix_status.c_str());
-    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, fix_color, 1);
-    col4_y += line_height;
-
-    snprintf(text, sizeof(text), "Sats: %d", gps_satellites);
-    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
-    col4_y += line_height;
+    snprintf(text, sizeof(text), "Fix: %s (%d sats)", gps_fix_status.c_str(), gps_satellites);
+    cv::putText(panel, text, cv::Point(col2_x, col2_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, fix_color, 1);
+    col2_y += line_height;
 
     snprintf(text, sizeof(text), "Lat: %.6f", latitude);
-    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
-    col4_y += line_height;
+    cv::putText(panel, text, cv::Point(col2_x, col2_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col2_y += line_height;
 
     snprintf(text, sizeof(text), "Lon: %.6f", longitude);
-    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
-    col4_y += line_height;
+    cv::putText(panel, text, cv::Point(col2_x, col2_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col2_y += line_height;
 
-    snprintf(text, sizeof(text), "Alt: %.1fm", altitude);
-    cv::putText(panel, text, cv::Point(col4_x, col4_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
+    snprintf(text, sizeof(text), "Alt: %.1f m", altitude);
+    cv::putText(panel, text, cv::Point(col2_x, col2_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col2_y += line_height;
+
+    snprintf(text, sizeof(text), "IMU: %.1f, %.1f, %.1f", accel_x, accel_y, accel_z);
+    cv::putText(panel, text, cv::Point(col2_x, col2_y), cv::FONT_HERSHEY_SIMPLEX, 0.45, data_color, 1);
 
     return panel;
 }
@@ -227,26 +190,24 @@ cv::Mat createSummaryPanel(int width, int height)
 // Helper function to create composite display
 cv::Mat createCompositeDisplay(const cv::Mat& main_fused, int screen_width, int screen_height)
 {
-    // Calculate adaptive layout dimensions
-    int main_width = (screen_width * 2) / 3;      // 1280 for 1920px
-    int main_height = (screen_height * 2) / 3;    // 720 for 1080px
-    int side_width = screen_width / 3;             // 640 for 1920px
-    int side_height = main_height / 2;             // 360 for 720px
-    int summary_height = screen_height - main_height; // 360 for 1080px
+    // Layout: Main 2/3 width full height, side panels 1/3 width × 1/3 height each
+    int main_width = (screen_width * 2) / 3;
+    int main_height = screen_height;
+    int side_width = screen_width / 3;
+    int side_height = screen_height / 3;
 
-    // Create output canvas
     cv::Mat composite(screen_height, screen_width, CV_8UC3, cv::Scalar(0, 0, 0));
 
-    // Scale and place main view (2x from 640x360)
+    // Main view (left, full height)
     cv::Mat main_scaled;
-    cv::resize(main_fused, main_scaled, cv::Size(main_width, main_height));
-    main_scaled.copyTo(composite(cv::Rect(0, 0, main_width, main_height)));
-
-    // Add label for main view
+    if (!main_fused.empty()) {
+        cv::resize(main_fused, main_scaled, cv::Size(main_width, main_height));
+        main_scaled.copyTo(composite(cv::Rect(0, 0, main_width, main_height)));
+    }
     cv::putText(composite, "MAIN VIEW", cv::Point(10, 25),
                 cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
 
-    // Scale and place driver monitor (top-right)
+    // Driver monitor (top-right)
     cv::Mat driver_display;
     if (!driver_monitor_image.empty()) {
         cv::resize(driver_monitor_image, driver_display, cv::Size(side_width, side_height));
@@ -261,25 +222,20 @@ cv::Mat createCompositeDisplay(const cv::Mat& main_fused, int screen_width, int 
     cv::putText(composite, "DRIVER MONITOR", cv::Point(main_width + 10, 25),
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
 
-    // Scale and place depth view (middle-right)
-    // Use try_lock to avoid blocking - use cached depth if new data isn't immediately available
+    // Stereo depth (middle-right)
     cv::Mat depth_display;
     cv::Mat depth_to_display;
-
-    // Try to get the latest cached disparity without blocking
     if (depth_mutex.try_lock()) {
         depth_to_display = stereo_depth_image_cached.clone();
         depth_mutex.unlock();
     } else {
-        // If lock fails (disparity callback is updating), use the already-displayed version
         depth_to_display = stereo_depth_image;
     }
 
-    // Skip updating disparity colorization every N frames to reduce GPU load
     disparity_skip_frames++;
-    if (disparity_skip_frames >= 3) {  // Update disparity display every 3 frames (~30fps if display is ~90fps)
+    if (disparity_skip_frames >= 3) {
         if (!depth_to_display.empty()) {
-            stereo_depth_image = depth_to_display;  // Update main display version
+            stereo_depth_image = depth_to_display;
         }
         disparity_skip_frames = 0;
     }
@@ -298,51 +254,11 @@ cv::Mat createCompositeDisplay(const cv::Mat& main_fused, int screen_width, int 
     cv::putText(composite, "STEREO DEPTH", cv::Point(main_width + 10, side_height + 25),
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
 
-    // Create and place summary panel (bottom)
-    cv::Mat summary = createSummaryPanel(screen_width, summary_height);
-    summary.copyTo(composite(cv::Rect(0, main_height, screen_width, summary_height)));
+    // Summary panel (bottom-right)
+    cv::Mat summary = createSummaryPanel(side_width, side_height);
+    summary.copyTo(composite(cv::Rect(main_width, side_height * 2, side_width, side_height)));
 
     return composite;
-}
-
-void drawlane(cv::Mat &image)
-{
-    // The lane points should be calculated in the postprocess function
-
-    std::vector<cv::Scalar> colors = {
-        cv::Scalar(255, 0, 0),
-        cv::Scalar(0, 255, 0),
-        cv::Scalar(0, 0, 255),
-        cv::Scalar(255, 255, 0)
-    };
-
-    std::vector<cv::Point> current_lane;
-    size_t lane_index = 0;
-    for (size_t j = 0; j < lanes_msg->xs.size(); ++j) {
-        int x = lanes_msg->xs[j];
-        int y = lanes_msg->ys[j];
-
-        if (x == -1 && y == -1) {
-            // This means we've reached the delimiter for a lane
-            // Draw the current lane if it has points
-            if (!current_lane.empty()) {
-                cv::polylines(image, current_lane, false, colors[lane_index], 3);
-                current_lane.clear();  // Clear current_lane for the next set of points
-                lane_index++;
-            }
-        } else {
-            current_lane.push_back(cv::Point(x/3, y/3));
-        }
-    }
-    // Now, draw the circles
-    for (size_t j = 0; j < lanes_msg->xs.size(); ++j) {
-        int x = lanes_msg->xs[j];
-        int y = lanes_msg->ys[j];
-
-        if (x != -1 && y != -1) {
-            cv::circle(image, cv::Point(x/3, y/3), 2, cv::Scalar(50,50,50), -1);
-        }
-    }
 }
 
 void publishSceneData() {
@@ -409,9 +325,9 @@ void publishSceneData() {
     
     // Pedestrian detection logic
     std::vector<std::string> pedestrian_positions;
-    
+
     if (detect_msg != NULL) {
-        int img_width = 1920;  // Use default image width
+        int img_width = detect_msg->image.width * 3;  // Get actual image width from detect msg
         float camera_center_x = img_width / 2.0f;
         
         for (int i = 0; i < detect_msg->num_detections; i++) {
@@ -458,9 +374,6 @@ void publishSceneData() {
     
     // Publish the scene data
     scene_pub->publish(scene_data);
-    
-    ROS_INFO("Published scene data: Time=%s, EgoTrans=%s, Pedest=%s", 
-             scene_data.time.c_str(), scene_data.ego_trans.c_str(), scene_data.pedest.c_str());
 }
 
 void drawLaneChangeIndicator(cv::Mat &image)
@@ -531,23 +444,85 @@ void fuse_data()
         cv::Scalar(120, 55, 70)   //traffic sign
     };
     cv::Mat img;
-    auto img_msg = std::make_shared<sensor_msgs::msg::Image>(detect_msg->image);
 
-    convert_message_to_frame(img_msg, img);
-
-    if (detect_msg==NULL || signs_msg==NULL || lanes_msg==NULL)
+    // Only detect_msg is required (it contains the image)
+    if (detect_msg == NULL)
         return;
 
-    drawlane(img);
+    // Make local copies of shared pointers to prevent race conditions
+    // These could be modified by callbacks while we're processing
+    auto local_detect_msg = detect_msg;
+    auto local_lanes_msg = lanes_msg;
+    auto local_signs_msg = signs_msg;
+    auto local_adas_msg = adas_msg;
+    cv::Mat local_driver_image = driver_monitor_image.clone();
 
-    auto boxes = detect_msg->boxes;
-    auto classes = detect_msg->classes;
-    auto scores = detect_msg->scores;
-    auto num_detections = detect_msg->num_detections;
-    auto track_list = detect_msg->track_list;
-    auto signLabels = signs_msg->labels;
-    auto signScores = signs_msg->scores;
-    
+    auto img_msg = std::make_shared<sensor_msgs::msg::Image>(local_detect_msg->image);
+    convert_message_to_frame(img_msg, img);
+
+    if (img.empty()) {
+        ROS_WARN("Empty image received in fuse_data");
+        return;
+    }
+
+    // Convert RGB to BGR for OpenCV display if needed
+    if (img_msg->encoding == "rgb8" && img.channels() == 3) {
+        cv::cvtColor(img, img, cv::COLOR_RGB2BGR);
+    }
+
+    // Draw lanes if available (using local copy)
+    if (local_lanes_msg != NULL && !local_lanes_msg->xs.empty()) {
+        // Copy lane data locally to avoid race conditions
+        auto local_xs = local_lanes_msg->xs;
+        auto local_ys = local_lanes_msg->ys;
+
+        std::vector<cv::Scalar> lane_colors = {
+            cv::Scalar(255, 0, 0),
+            cv::Scalar(0, 255, 0),
+            cv::Scalar(0, 0, 255),
+            cv::Scalar(255, 255, 0)
+        };
+
+        std::vector<cv::Point> current_lane;
+        size_t lane_index = 0;
+        for (size_t j = 0; j < local_xs.size() && j < local_ys.size(); ++j) {
+            int x = local_xs[j];
+            int y = local_ys[j];
+
+            if (x == -1 && y == -1) {
+                if (!current_lane.empty()) {
+                    cv::polylines(img, current_lane, false, lane_colors[lane_index % lane_colors.size()], 3);
+                    current_lane.clear();
+                    lane_index++;
+                }
+            } else {
+                current_lane.push_back(cv::Point(x/3, y/3));
+            }
+        }
+        // Draw circles
+        for (size_t j = 0; j < local_xs.size() && j < local_ys.size(); ++j) {
+            int x = local_xs[j];
+            int y = local_ys[j];
+            if (x != -1 && y != -1) {
+                cv::circle(img, cv::Point(x/3, y/3), 2, cv::Scalar(50,50,50), -1);
+            }
+        }
+    }
+
+    auto boxes = local_detect_msg->boxes;
+    auto classes = local_detect_msg->classes;
+    auto scores = local_detect_msg->scores;
+    auto num_detections = local_detect_msg->num_detections;
+    auto track_list = local_detect_msg->track_list;
+
+    // Signs are optional
+    std::vector<std::string> signLabels;
+    std::vector<float> signScores;
+    if (local_signs_msg != NULL) {
+        signLabels = local_signs_msg->labels;
+        signScores = local_signs_msg->scores;
+    }
+
     size_t j = 0; // index for sign and light labels
     cv::String label = "";
     int baseline = 0;
@@ -644,10 +619,9 @@ void fuse_data()
             cv::rectangle(img, cv::Rect(x, y, w, h), colors[classes[i]], 4);
         }
         
-        else if (classes[i] == 6 && signScores[j]>0.5 && j<signLabels.size())  // if traffic light
+        else if (classes[i] == 6 && j<signLabels.size() && j<signScores.size() && signScores[j]>0.5)  // if traffic light
         {
             label = signLabels[j];
-            std::cout << "label: " << label << std::endl;
             if (label == "red light") 
             {
                 label = label +  " " + std::to_string(signScores[j]).substr(0, 4);  // add score to label
@@ -688,11 +662,9 @@ void fuse_data()
             
         }
 
-        else if (classes[i] == 7 && signScores[j]>0.65 && j<signLabels.size())  // if traffic sign
+        else if (classes[i] == 7 && j<signLabels.size() && j<signScores.size() && signScores[j]>0.65)  // if traffic sign
         {
             label = signLabels[j];
-            std::cout << "label: " << label << std::endl;
-
             if (label != "guide sign")
             {
                 label = label +  " " + std::to_string(signScores[j]).substr(0, 4);  // add score to label
@@ -706,14 +678,16 @@ void fuse_data()
     }
 
     // Draw road trapezoid based on lane polylines with extrapolation
-    if (lanes_msg != NULL && !lanes_msg->xs.empty()) {
-        // Step 1: Extract individual lane polylines
+    if (local_lanes_msg != NULL && !local_lanes_msg->xs.empty()) {
+        // Step 1: Extract individual lane polylines (use local copy already made)
+        auto local_xs = local_lanes_msg->xs;
+        auto local_ys = local_lanes_msg->ys;
         std::vector<std::vector<cv::Point>> lane_polylines;
         std::vector<cv::Point> current_lane;
-        
-        for (size_t j = 0; j < lanes_msg->xs.size(); ++j) {
-            int x = lanes_msg->xs[j];
-            int y = lanes_msg->ys[j];
+
+        for (size_t j = 0; j < local_xs.size() && j < local_ys.size(); ++j) {
+            int x = local_xs[j];
+            int y = local_ys[j];
 
             if (x == -1 && y == -1) {
                 // Lane delimiter - save current polyline
@@ -730,25 +704,25 @@ void fuse_data()
             lane_polylines.push_back(current_lane);
         }
         
-        if (adas_msg != NULL && lane_polylines.size() >= 1) {
+        if (local_adas_msg != NULL && lane_polylines.size() >= 1) {
             int img_height = img.rows;
             int img_width = img.cols;
-            
+
             // Use extrapolated points from ADAS (convert from normalized coordinates)
             std::vector<cv::Point> lane_top_points_by_color(4);
             std::vector<cv::Point> lane_bottom_points_by_color(4);
             std::vector<bool> valid_lane_by_color(4, false);
-            
+
             // Convert normalized coordinates from ADAS to GUI display coordinates
             for (int i = 0; i < 4; i++) {
-                if (adas_msg->lane_valid[i]) {
+                if (local_adas_msg->lane_valid[i]) {
                     lane_top_points_by_color[i] = cv::Point(
-                        static_cast<int>(adas_msg->lane_top_x[i] * img_width),
-                        static_cast<int>(adas_msg->lane_top_y[i] * img_height)
+                        static_cast<int>(local_adas_msg->lane_top_x[i] * img_width),
+                        static_cast<int>(local_adas_msg->lane_top_y[i] * img_height)
                     );
                     lane_bottom_points_by_color[i] = cv::Point(
-                        static_cast<int>(adas_msg->lane_bottom_x[i] * img_width),
-                        static_cast<int>(adas_msg->lane_bottom_y[i] * img_height)
+                        static_cast<int>(local_adas_msg->lane_bottom_x[i] * img_width),
+                        static_cast<int>(local_adas_msg->lane_bottom_y[i] * img_height)
                     );
                     valid_lane_by_color[i] = true;
                 }
@@ -877,7 +851,7 @@ void fuse_data()
             lane_region_3_available = valid_lane_by_color[2] && valid_lane_by_color[3]; // Lane 3 (between lines 2-3)
 
             // Vehicle quadrant identification system
-            if (detect_msg != NULL) {
+            if (local_detect_msg != NULL) {
                 // Clear previous quadrant assignments
                 quadrant_v11 = "None";
                 quadrant_v12 = "None";
@@ -902,21 +876,21 @@ void fuse_data()
                 std::vector<VehicleInfo> lane1_vehicles, lane2_vehicles, lane3_vehicles;
                 
                 // Analyze each detected vehicle
-                for (int i = 0; i < detect_msg->num_detections; i++) {
+                for (int i = 0; i < local_detect_msg->num_detections; i++) {
                     // Only analyze tracked vehicle classes (cars, trucks, buses, pedestrians, cyclists)
-                    if (detect_msg->classes[i] >= 0 && detect_msg->classes[i] <= 4 && !detect_msg->track_list[i].empty()) {
+                    if (local_detect_msg->classes[i] >= 0 && local_detect_msg->classes[i] <= 4 && !local_detect_msg->track_list[i].empty()) {
                         // Get vehicle bounding box (scaled coordinates)
-                        int x = static_cast<int>(detect_msg->boxes[i].data[0]/3);
-                        int y = static_cast<int>(detect_msg->boxes[i].data[1]/3);
-                        int w = static_cast<int>(detect_msg->boxes[i].data[2]/3);
-                        int h = static_cast<int>(detect_msg->boxes[i].data[3]/3);
-                        
+                        int x = static_cast<int>(local_detect_msg->boxes[i].data[0]/3);
+                        int y = static_cast<int>(local_detect_msg->boxes[i].data[1]/3);
+                        int w = static_cast<int>(local_detect_msg->boxes[i].data[2]/3);
+                        int h = static_cast<int>(local_detect_msg->boxes[i].data[3]/3);
+
                         // Use bottom center of bounding box for position
                         int bottom_center_x = x + w/2;
                         int bottom_center_y = y + h;
-                        
-                        VehicleInfo vehicle = {i, bottom_center_x, bottom_center_y, 
-                                             detect_msg->track_list[i], static_cast<int>(detect_msg->classes[i])};
+
+                        VehicleInfo vehicle = {i, bottom_center_x, bottom_center_y,
+                                             local_detect_msg->track_list[i], static_cast<int>(local_detect_msg->classes[i])};
                         
                         // Check which lane the vehicle is in using point-in-polygon test
                         // Lane 1 check
@@ -987,20 +961,20 @@ void fuse_data()
                     
                     // Draw vehicle position indicator with just quadrant ID
                     cv::circle(img, cv::Point(closest.bottom_center_x, closest.bottom_center_y), 4, cv::Scalar(255, 255, 255), -1);
-                    cv::putText(img, assigned_quadrant, cv::Point(closest.bottom_center_x - 15, closest.bottom_center_y - 10), 
+                    cv::putText(img, assigned_quadrant, cv::Point(closest.bottom_center_x - 15, closest.bottom_center_y - 10),
                                cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 2);
-                    
+
                     // If there's a second vehicle, assign it to the other row
                     if (vehicles.size() > 1) {
                         const auto& second = vehicles[1];
                         std::string second_quadrant;
-                        
+
                         if (assigned_quadrant == row2_quadrant) {
                             second_quadrant = row1_quadrant; // Put second vehicle in first row
                         } else {
                             second_quadrant = row2_quadrant; // Put second vehicle in second row
                         }
-                        
+
                         // Store second vehicle in global quadrant variables
                         if (second_quadrant == "V11") quadrant_v11 = second.track_id;
                         else if (second_quadrant == "V12") quadrant_v12 = second.track_id;
@@ -1008,20 +982,12 @@ void fuse_data()
                         else if (second_quadrant == "V21") quadrant_v21 = second.track_id;
                         else if (second_quadrant == "V22") quadrant_v22 = second.track_id;
                         else if (second_quadrant == "V23") quadrant_v23 = second.track_id;
-                        
+
                         // Draw second vehicle position indicator with just quadrant ID
                         cv::circle(img, cv::Point(second.bottom_center_x, second.bottom_center_y), 3, cv::Scalar(255, 255, 255), -1);
-                        cv::putText(img, second_quadrant, cv::Point(second.bottom_center_x - 15, second.bottom_center_y - 10), 
+                        cv::putText(img, second_quadrant, cv::Point(second.bottom_center_x - 15, second.bottom_center_y - 10),
                                    cv::FONT_HERSHEY_PLAIN, 0.8, cv::Scalar(255, 255, 255), 1);
                     }
-                    
-                    // Debug output
-                    std::cout << "Lane " << lane_id << " - Closest: " << closest.track_id << " -> " << assigned_quadrant;
-                    if (vehicles.size() > 1) {
-                        std::string second_quadrant = (assigned_quadrant[1] == '2') ? row1_quadrant : row2_quadrant;
-                        std::cout << ", Second: " << vehicles[1].track_id << " -> " << second_quadrant;
-                    }
-                    std::cout << std::endl;
                 };
                 
                 // Assign vehicles in each lane
@@ -1031,9 +997,9 @@ void fuse_data()
             }
         } else {
             // If ADAS data not available, set lane region availability based on lane data existence
-            lane_region_1_available = !lanes_msg->xs.empty();
-            lane_region_2_available = !lanes_msg->xs.empty();
-            lane_region_3_available = !lanes_msg->xs.empty();
+            lane_region_1_available = !local_lanes_msg->xs.empty();
+            lane_region_2_available = !local_lanes_msg->xs.empty();
+            lane_region_3_available = !local_lanes_msg->xs.empty();
         }
     }
 
@@ -1043,33 +1009,15 @@ void fuse_data()
     // Publish scene data
     publishSceneData();
 
-    // Create composite display with adaptive layout
-    cv::Mat composite = createCompositeDisplay(img, 1920, 1080);
+    // Create composite display with adaptive layout using detected screen size
+    cv::Mat composite = createCompositeDisplay(img, screen_width, screen_height);
 
     sensor_msgs::msg::Image msg;
     msg.header.stamp = ROS_TIME_NOW();
-    // Convert composite image to ROS message
     convert_frame_to_message(composite, msg);
     gui_pub->publish(msg);
 
-    // Stretch image to fill fullscreen display (no letterboxing)
-    // Get screen dimensions from environment or use common resolutions
-    cv::Mat display_image = composite;
-    int display_width = 1920;
-    int display_height = 1080;
-
-    // Check for environment variable or detect from display
-    const char* width_env = std::getenv("DISPLAY_WIDTH");
-    const char* height_env = std::getenv("DISPLAY_HEIGHT");
-    if (width_env) display_width = std::atoi(width_env);
-    if (height_env) display_height = std::atoi(height_env);
-
-    // Stretch composite image to fill screen (ignores aspect ratio for full coverage)
-    if (composite.cols != display_width || composite.rows != display_height) {
-        cv::resize(composite, display_image, cv::Size(display_width, display_height), 0, 0, cv::INTER_LINEAR);
-    }
-
-    cv::imshow("Perception Fusion", display_image);
+    cv::imshow("Perception Fusion", composite);
     cv::waitKey(1);
 }
 
@@ -1102,26 +1050,33 @@ void lanes_callback(const visionconnect::msg::Lanes::SharedPtr input)
 void adas_callback(const visionconnect::msg::ADAS::SharedPtr input)
 {
     adas_msg = input;
-    ROS_INFO("ADAS message received: left=%d, right=%d, offset=%.2f",
-             adas_msg->lane_change_left, adas_msg->lane_change_right, adas_msg->lane_center_offset);
 }
 
 // Driver monitor image callback
 void driver_monitor_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
-    static bool first_call = true;
-    // Convert ROS Image to OpenCV Mat
+    if (msg->data.empty() || msg->width == 0 || msg->height == 0) {
+        return;
+    }
+
+    // Resize target for driver monitor panel (small size for efficiency)
+    const int target_w = 320;
+    const int target_h = 180;
+
+    cv::Mat full_image;
     if (msg->encoding == "rgb8") {
         cv::Mat rgb_image(msg->height, msg->width, CV_8UC3,
                          const_cast<uint8_t*>(msg->data.data()), msg->step);
-        cv::cvtColor(rgb_image, driver_monitor_image, cv::COLOR_RGB2BGR);
+        // Resize first (faster), then convert color on smaller image
+        cv::Mat small_rgb;
+        cv::resize(rgb_image, small_rgb, cv::Size(target_w, target_h), 0, 0, cv::INTER_NEAREST);
+        cv::cvtColor(small_rgb, driver_monitor_image, cv::COLOR_RGB2BGR);
     } else if (msg->encoding == "bgr8") {
-        driver_monitor_image = cv::Mat(msg->height, msg->width, CV_8UC3,
-                                       const_cast<uint8_t*>(msg->data.data()), msg->step).clone();
-    }
-    if (first_call) {
-        ROS_INFO("Driver monitor callback triggered: %dx%d %s", msg->width, msg->height, msg->encoding.c_str());
-        first_call = false;
+        cv::Mat bgr_image(msg->height, msg->width, CV_8UC3,
+                         const_cast<uint8_t*>(msg->data.data()), msg->step);
+        cv::resize(bgr_image, driver_monitor_image, cv::Size(target_w, target_h), 0, 0, cv::INTER_NEAREST);
+    } else {
+        return;
     }
 }
 
@@ -1141,6 +1096,21 @@ void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
     static bool first_call = true;
     cv::Mat temp_depth;
+
+    // Validate image data before processing
+    if (msg->data.empty() || msg->width == 0 || msg->height == 0) {
+        if (first_call) {
+            ROS_WARN("Depth callback: Empty or invalid image received");
+        }
+        return;
+    }
+
+    // Validate data size matches expected dimensions
+    size_t expected_size = msg->step * msg->height;
+    if (msg->data.size() < expected_size) {
+        ROS_WARN("Depth callback: Data size mismatch - expected %zu, got %zu", expected_size, msg->data.size());
+        return;
+    }
 
     // Convert depth image to OpenCV Mat (quick conversion, minimal blocking)
     if (msg->encoding == "32FC1") {
@@ -1251,6 +1221,17 @@ int main(int argc, char **argv)
 {
     ROS_CREATE_NODE("gui");
     std::string package_share_directory = ament_index_cpp::get_package_share_directory("visionconnect");
+
+    // Detect screen resolution using X11
+    Display* disp = XOpenDisplay(NULL);
+    if (disp) {
+        Screen* scrn = DefaultScreenOfDisplay(disp);
+        screen_width = scrn->width;
+        screen_height = scrn->height;
+        XCloseDisplay(disp);
+        ROS_INFO("Detected screen resolution: %dx%d", screen_width, screen_height);
+    }
+
     cv::namedWindow("Perception Fusion", cv::WINDOW_NORMAL);
     cv::setWindowProperty("Perception Fusion", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
 

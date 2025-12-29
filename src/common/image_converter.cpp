@@ -172,17 +172,16 @@ bool imageConverter::Convert( sensor_msgs::Image& msg, imageFormat format, Pixel
 	// calculate size of the msg
 	const size_t msg_size = imageFormatSize(format, mWidth, mHeight);
 
-	// allocate msg storage
-	msg.data.resize(msg_size);
-
-	// copy the converted image into the msg
+	// use assign() with pointers - faster than resize + memcpy
 	if (format != IMAGE_GRAY8)
 	{
-		memcpy(msg.data.data(), mInputCPU, msg_size);
+		uint8_t* src = reinterpret_cast<uint8_t*>(mInputCPU);
+		msg.data.assign(src, src + msg_size);
 	}
-	else 
+	else
 	{
-		memcpy(msg.data.data(), mOutputCPU, msg_size);
+		uint8_t* src = reinterpret_cast<uint8_t*>(mOutputCPU);
+		msg.data.assign(src, src + msg_size);
 	}
 		
 	// populate metadata

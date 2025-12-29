@@ -69,7 +69,8 @@ sudo apt install -y \
     python3-pip \
     python3-numpy \
     python3-opencv \
-    python3-rosidl-generator-py \
+    python3-ament-package \
+    ros-humble-rosidl-generator-py \
     ros-humble-rosidl-typesupport-introspection-cpp \
     ros-humble-rosidl-typesupport-introspection-c
 
@@ -83,24 +84,35 @@ sudo apt install -y \
     gstreamer1.0-libav \
     v4l-utils
 
-echo -e "\n7. Installing Qt5 dependencies..."
-sudo apt install -y \
-    qtbase5-dev \
-    qtchooser \
-    qt5-qmake \
-    qtbase5-dev-tools \
-    libqt5webkit5-dev \
-    libqt5opengl5-dev \
-    libqt5svg5-dev \
-    libqt5multimedia5 \
-    libqt5multimediawidgets5
+echo -e "\n7. Checking OpenCV installation..."
+# Check if OpenCV from source is installed and reinstall headers if needed
+if [ -f "/usr/lib/aarch64-linux-gnu/cmake/opencv4/OpenCVConfig.cmake" ]; then
+    OPENCV_VER=$(grep 'SET(OpenCV_VERSION ' /usr/lib/aarch64-linux-gnu/cmake/opencv4/OpenCVConfig.cmake | grep -oP '\d+\.\d+\.\d+')
+    echo "OpenCV libraries version: $OPENCV_VER"
 
-echo -e "\n8. Installing OpenCV (should be pre-installed with JetPack)..."
-if ! check_package libopencv-dev; then
-    sudo apt install -y libopencv-dev
+    # Check if headers match libraries (system packages may overwrite headers)
+    if [ -f "/usr/include/opencv4/opencv2/core/version.hpp" ]; then
+        HEADER_MINOR=$(grep '#define CV_VERSION_MINOR' /usr/include/opencv4/opencv2/core/version.hpp | grep -oP '\d+')
+        LIB_MINOR=$(echo $OPENCV_VER | cut -d. -f2)
+        if [ "$HEADER_MINOR" != "$LIB_MINOR" ]; then
+            echo "Warning: Header/library version mismatch detected (headers: 4.$HEADER_MINOR, libs: $OPENCV_VER)"
+            if [ -d ~/opencv/build ]; then
+                echo "Reinstalling OpenCV headers from source build..."
+                cd ~/opencv/build && sudo make install > /dev/null 2>&1
+                echo "✓ OpenCV headers reinstalled"
+            else
+                echo "Please rebuild OpenCV from source to fix header mismatch."
+            fi
+        else
+            echo "✓ OpenCV version: $OPENCV_VER (headers and libraries match)"
+        fi
+    fi
+else
+    echo "OpenCV not found. Please run install_opencv_cuda_orin.sh first to build OpenCV with CUDA support."
+    echo "Run: bash install_opencv_cuda_orin.sh"
 fi
 
-echo -e "\n9. Setting up environment variables..."
+echo -e "\n8. Setting up environment variables..."
 cat >> ~/.bashrc << 'EOL'
 
 # ROS2 Humble
@@ -117,11 +129,11 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/tegra:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 EOL
 
-echo -e "\n10. Installing Python packages..."
+echo -e "\n9. Installing Python packages..."
 pip3 install --upgrade pip
 pip3 install numpy pyserial
 
-echo -e "\n11. Checking jetson-inference installation..."
+echo -e "\n10. Checking jetson-inference installation..."
 if [ ! -d "/usr/local/include/jetson-utils" ]; then
     echo "jetson-inference not found. Installing..."
     cd ~
@@ -138,7 +150,7 @@ else
     echo "✓ jetson-inference already installed"
 fi
 
-echo -e "\n12. Verifying installations..."
+echo -e "\n11. Verifying installations..."
 echo "Checking CUDA..."
 nvcc --version || echo "✗ CUDA not found"
 

@@ -1,106 +1,266 @@
 /**
- * CUDA-Accelerated Stereo Depth Node
+ * TensorRT-Accelerated Stereo Depth Node
  *
  * Combined node that:
  * 1. Subscribes to left/right raw images from camera_stereo
- * 2. Uploads to GPU and converts to grayscale on GPU
- * 3. Computes disparity using CUDA StereoSGM
- * 4. Applies median filter on GPU
- * 5. Publishes disparity image to /stereo_depth/disparity
+ * 2. Preprocesses images (resize, pad, normalize) for LightStereo model
+ * 3. Runs TensorRT inference for disparity estimation
+ * 4. Publishes disparity image to /stereo_depth/disparity
  *
- * All operations except initial image conversion are GPU-accelerated
+ * Uses LightStereo deep learning model for accurate stereo matching
  */
 
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include <opencv2/opencv.hpp>
-#include <opencv2/core/cuda.hpp>
-#include <opencv2/cudastereo.hpp>
-#include <opencv2/cudaimgproc.hpp>
-#include <opencv2/cudafilters.hpp>
-#include <opencv2/cudawarping.hpp>
 #include <message_filters/subscriber.h>
 #include <message_filters/time_synchronizer.h>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
+#include <NvInfer.h>
+#include <cuda_runtime.h>
+#include <fstream>
+#include <chrono>
+
+//==============================================================================
+// TensorRT Logger
+//==============================================================================
+class TRTLogger : public nvinfer1::ILogger {
+public:
+    void log(Severity severity, const char* msg) noexcept override {
+        if (severity <= Severity::kWARNING) {
+            std::cout << "[TRT] " << msg << std::endl;
+        }
+    }
+};
+
+static TRTLogger g_trt_logger;
+
+//==============================================================================
+// Preprocessor - Matches LightStereo model requirements
+//==============================================================================
+class StereoPreprocessor {
+public:
+    // ImageNet normalization parameters
+    static constexpr float MEAN[3] = {0.485f, 0.456f, 0.406f};
+    static constexpr float STD[3] = {0.229f, 0.224f, 0.225f};
+
+    StereoPreprocessor(int target_h, int target_w)
+        : target_h_(target_h), target_w_(target_w) {
+        output_.resize(3 * target_h * target_w);
+    }
+
+    // Process RGB image -> normalized CHW tensor
+    // Uses RightTopPad: pad top and right with edge replication
+    const std::vector<float>& process(const cv::Mat& input_rgb) {
+        int in_h = input_rgb.rows;
+        int in_w = input_rgb.cols;
+
+        // Step 1: Resize to fit within target while maintaining aspect ratio
+        float scale = std::min((float)target_h_ / in_h, (float)target_w_ / in_w);
+        int new_h = static_cast<int>(in_h * scale);
+        int new_w = static_cast<int>(in_w * scale);
+
+        cv::Mat resized;
+        cv::resize(input_rgb, resized, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
+
+        // Step 2: RightTopPad to target size (pad top and right with edge replication)
+        int pad_top = target_h_ - new_h;
+        int pad_right = target_w_ - new_w;
+
+        cv::Mat padded;
+        cv::copyMakeBorder(resized, padded, pad_top, 0, 0, pad_right, cv::BORDER_REPLICATE);
+
+        // Step 3: Transpose (HWC -> CHW) and Normalize
+        for (int y = 0; y < target_h_; y++) {
+            for (int x = 0; x < target_w_; x++) {
+                const cv::Vec3f& pixel = padded.at<cv::Vec3f>(y, x);
+                for (int c = 0; c < 3; c++) {
+                    int idx = c * target_h_ * target_w_ + y * target_w_ + x;
+                    output_[idx] = ((pixel[c] / 255.0f) - MEAN[c]) / STD[c];
+                }
+            }
+        }
+
+        return output_;
+    }
+
+    const std::vector<float>& getOutput() const { return output_; }
+
+private:
+    int target_h_;
+    int target_w_;
+    std::vector<float> output_;
+};
+
+constexpr float StereoPreprocessor::MEAN[3];
+constexpr float StereoPreprocessor::STD[3];
+
+//==============================================================================
+// TensorRT Stereo Engine
+//==============================================================================
+class StereoTRTEngine {
+public:
+    StereoTRTEngine(const std::string& engine_path) {
+        // Load engine file
+        std::ifstream file(engine_path, std::ios::binary);
+        if (!file.good()) {
+            throw std::runtime_error("Cannot open engine file: " + engine_path);
+        }
+
+        file.seekg(0, std::ios::end);
+        size_t size = file.tellg();
+        file.seekg(0, std::ios::beg);
+
+        std::vector<char> engine_data(size);
+        file.read(engine_data.data(), size);
+        file.close();
+
+        // Create runtime and engine
+        runtime_ = nvinfer1::createInferRuntime(g_trt_logger);
+        engine_ = runtime_->deserializeCudaEngine(engine_data.data(), size);
+        context_ = engine_->createExecutionContext();
+
+        if (!engine_ || !context_) {
+            throw std::runtime_error("Failed to create TensorRT engine");
+        }
+
+        // Get tensor info
+        left_dims_ = engine_->getTensorShape("left_img");
+        right_dims_ = engine_->getTensorShape("right_img");
+        output_dims_ = engine_->getTensorShape("disp_pred");
+
+        input_h_ = left_dims_.d[2];
+        input_w_ = left_dims_.d[3];
+        output_h_ = output_dims_.d[output_dims_.nbDims - 2];
+        output_w_ = output_dims_.d[output_dims_.nbDims - 1];
+
+        size_t input_bytes = tensorVolume(left_dims_) * sizeof(float);
+        size_t output_bytes = tensorVolume(output_dims_) * sizeof(float);
+
+        // Allocate GPU buffers
+        cudaMalloc(&d_left_, input_bytes);
+        cudaMalloc(&d_right_, input_bytes);
+        cudaMalloc(&d_output_, output_bytes);
+
+        // Set tensor addresses
+        context_->setTensorAddress("left_img", d_left_);
+        context_->setTensorAddress("right_img", d_right_);
+        context_->setTensorAddress("disp_pred", d_output_);
+
+        cudaStreamCreate(&stream_);
+
+        // Allocate output buffer
+        output_.resize(tensorVolume(output_dims_));
+
+        std::cout << "Stereo engine loaded: input " << input_w_ << "x" << input_h_
+                  << ", output " << output_w_ << "x" << output_h_ << std::endl;
+    }
+
+    ~StereoTRTEngine() {
+        if (stream_) cudaStreamDestroy(stream_);
+        if (d_left_) cudaFree(d_left_);
+        if (d_right_) cudaFree(d_right_);
+        if (d_output_) cudaFree(d_output_);
+        if (context_) delete context_;
+        if (engine_) delete engine_;
+        if (runtime_) delete runtime_;
+    }
+
+    void infer(const std::vector<float>& left, const std::vector<float>& right) {
+        size_t input_bytes = tensorVolume(left_dims_) * sizeof(float);
+
+        cudaMemcpyAsync(d_left_, left.data(), input_bytes, cudaMemcpyHostToDevice, stream_);
+        cudaMemcpyAsync(d_right_, right.data(), input_bytes, cudaMemcpyHostToDevice, stream_);
+
+        context_->enqueueV3(stream_);
+
+        cudaMemcpyAsync(output_.data(), d_output_, output_.size() * sizeof(float),
+                        cudaMemcpyDeviceToHost, stream_);
+        cudaStreamSynchronize(stream_);
+    }
+
+    void warmup(const std::vector<float>& left, const std::vector<float>& right, int iterations = 5) {
+        size_t input_bytes = tensorVolume(left_dims_) * sizeof(float);
+        cudaMemcpy(d_left_, left.data(), input_bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_right_, right.data(), input_bytes, cudaMemcpyHostToDevice);
+
+        for (int i = 0; i < iterations; i++) {
+            context_->enqueueV3(stream_);
+            cudaStreamSynchronize(stream_);
+        }
+    }
+
+    const std::vector<float>& getOutput() const { return output_; }
+    int inputHeight() const { return input_h_; }
+    int inputWidth() const { return input_w_; }
+    int outputHeight() const { return output_h_; }
+    int outputWidth() const { return output_w_; }
+
+private:
+    size_t tensorVolume(const nvinfer1::Dims& dims) {
+        size_t vol = 1;
+        for (int i = 0; i < dims.nbDims; ++i) {
+            vol *= dims.d[i];
+        }
+        return vol;
+    }
+
+    nvinfer1::IRuntime* runtime_ = nullptr;
+    nvinfer1::ICudaEngine* engine_ = nullptr;
+    nvinfer1::IExecutionContext* context_ = nullptr;
+    cudaStream_t stream_ = nullptr;
+
+    nvinfer1::Dims left_dims_, right_dims_, output_dims_;
+    int input_h_, input_w_, output_h_, output_w_;
+
+    void* d_left_ = nullptr;
+    void* d_right_ = nullptr;
+    void* d_output_ = nullptr;
+
+    std::vector<float> output_;
+};
+
+//==============================================================================
+// ROS2 Stereo Depth Node
+//==============================================================================
 class StereoDepthNode : public rclcpp::Node
 {
 public:
     StereoDepthNode() : Node("stereo_depth")
     {
-        // Check CUDA availability
-        int cuda_devices = cv::cuda::getCudaEnabledDeviceCount();
-        RCLCPP_INFO(this->get_logger(), "CUDA devices available: %d", cuda_devices);
-
-        if (cuda_devices == 0)
-        {
-            RCLCPP_ERROR(this->get_logger(), "No CUDA devices found!");
-            throw std::runtime_error("CUDA not available");
-        }
-
-        RCLCPP_INFO(this->get_logger(), "Using CUDA device: %d", cv::cuda::getDevice());
+        RCLCPP_INFO(this->get_logger(), "Initializing TensorRT Stereo Depth Node...");
 
         // Declare parameters
-        this->declare_parameter("min_disparity", 0);
-        this->declare_parameter("num_disparities", 64);  // Must be 64, 128, or 256 for CUDA
-        this->declare_parameter("block_size", 9);         // Odd number
-        this->declare_parameter("p1_multiplier", 8);
-        this->declare_parameter("p2_multiplier", 32);
-        this->declare_parameter("uniqueness_ratio", 10);
-        this->declare_parameter("median_filter_size", 5);
+        this->declare_parameter("model", "stereo-depth/LightStereo-S-KITTI.engine");
+        this->declare_parameter("max_disparity", 192.0);
+        this->declare_parameter("warmup_iterations", 5);
 
         // Get parameters
-        int min_disp = this->get_parameter("min_disparity").as_int();
-        num_disp_ = this->get_parameter("num_disparities").as_int();
-        int block_size = this->get_parameter("block_size").as_int();
-        int p1_mult = this->get_parameter("p1_multiplier").as_int();
-        int p2_mult = this->get_parameter("p2_multiplier").as_int();
-        int uniqueness = this->get_parameter("uniqueness_ratio").as_int();
-        median_kernel_ = this->get_parameter("median_filter_size").as_int();
+        std::string model_name = this->get_parameter("model").as_string();
+        max_disparity_ = this->get_parameter("max_disparity").as_double();
+        int warmup_iters = this->get_parameter("warmup_iterations").as_int();
 
-        // Calculate P1 and P2
-        int P1 = p1_mult * block_size * block_size;
-        int P2 = p2_mult * block_size * block_size;
+        // Resolve model path
+        std::string graphs_path = ament_index_cpp::get_package_share_directory("visionconnect") + "/graphs/";
+        std::string engine_path = graphs_path + model_name;
 
-        RCLCPP_INFO(this->get_logger(), "Creating CUDA StereoSGM with:");
-        RCLCPP_INFO(this->get_logger(), "  min_disparity: %d", min_disp);
-        RCLCPP_INFO(this->get_logger(), "  num_disparities: %d", num_disp_);
-        RCLCPP_INFO(this->get_logger(), "  block_size: %d", block_size);
-        RCLCPP_INFO(this->get_logger(), "  P1: %d, P2: %d", P1, P2);
-        RCLCPP_INFO(this->get_logger(), "  uniqueness_ratio: %d", uniqueness);
-        RCLCPP_INFO(this->get_logger(), "  median_filter_size: %d", median_kernel_);
+        RCLCPP_INFO(this->get_logger(), "Loading TensorRT engine: %s", engine_path.c_str());
 
-        // Try CUDA StereoSGM first, fallback to StereoBM if it fails
-        try
-        {
-            stereo_sgm_ = cv::cuda::createStereoSGM(
-                min_disp,
-                num_disp_,
-                P1,
-                P2,
-                uniqueness,
-                cv::cuda::StereoSGM::MODE_HH  // Horizontal-Horizontal mode
-            );
-            use_sgm_ = true;
-            RCLCPP_INFO(this->get_logger(), "✓ CUDA StereoSGM created successfully (MODE_HH)");
-        }
-        catch (const cv::Exception& e)
-        {
-            RCLCPP_WARN(this->get_logger(), "CUDA StereoSGM not available, using StereoBM: %s", e.what());
-            stereo_bm_ = cv::cuda::createStereoBM(num_disp_, block_size);
-            use_sgm_ = false;
-            RCLCPP_INFO(this->get_logger(), "✓ CUDA StereoBM created successfully");
+        // Initialize TensorRT engine
+        try {
+            engine_ = std::make_unique<StereoTRTEngine>(engine_path);
+            RCLCPP_INFO(this->get_logger(), "✓ TensorRT engine loaded successfully");
+            RCLCPP_INFO(this->get_logger(), "  Input size: %dx%d", engine_->inputWidth(), engine_->inputHeight());
+            RCLCPP_INFO(this->get_logger(), "  Output size: %dx%d", engine_->outputWidth(), engine_->outputHeight());
+        } catch (const std::exception& e) {
+            RCLCPP_ERROR(this->get_logger(), "Failed to load TensorRT engine: %s", e.what());
+            throw;
         }
 
-        // Load calibration for rectification
-        loadCalibration();
-
-        // CUDA median filter only supports unsigned types, not CV_16S
-        // We'll skip GPU median filter and apply it on CPU after conversion if needed
-        if (median_kernel_ > 0)
-        {
-            RCLCPP_INFO(this->get_logger(), "Median filter will be applied on CPU (kernel: %d)", median_kernel_);
-        }
+        // Initialize preprocessors
+        left_preproc_ = std::make_unique<StereoPreprocessor>(engine_->inputHeight(), engine_->inputWidth());
+        right_preproc_ = std::make_unique<StereoPreprocessor>(engine_->inputHeight(), engine_->inputWidth());
 
         // Create publisher
         disparity_pub_ = this->create_publisher<sensor_msgs::msg::Image>("disparity", 10);
@@ -117,106 +277,83 @@ public:
             std::bind(&StereoDepthNode::stereoCallback, this,
                      std::placeholders::_1, std::placeholders::_2));
 
-        RCLCPP_INFO(this->get_logger(), "CUDA stereo depth node initialized");
+        RCLCPP_INFO(this->get_logger(), "TensorRT stereo depth node initialized");
         RCLCPP_INFO(this->get_logger(), "Subscribed to: left/image_raw, right/image_raw");
         RCLCPP_INFO(this->get_logger(), "Publishing disparity to: /stereo_depth/disparity");
-        RCLCPP_INFO(this->get_logger(), "All operations GPU-accelerated!");
+
+        // Warmup will happen on first frame
+        warmup_done_ = false;
+        warmup_iterations_ = warmup_iters;
     }
 
 private:
     void stereoCallback(const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
                        const sensor_msgs::msg::Image::ConstSharedPtr& right_msg)
     {
+        auto t_start = std::chrono::high_resolution_clock::now();
+
         // Convert ROS messages to OpenCV Mat
         cv::Mat left = msgToMat(left_msg);
         cv::Mat right = msgToMat(right_msg);
 
-        // Upload to GPU
-        d_left_.upload(left, cuda_stream_);
-        d_right_.upload(right, cuda_stream_);
-
-        // Convert to grayscale on GPU if needed
-        if (left.channels() == 3)
-        {
-            cv::cuda::cvtColor(d_left_, d_left_gray_, cv::COLOR_BGR2GRAY, 0, cuda_stream_);
-            cv::cuda::cvtColor(d_right_, d_right_gray_, cv::COLOR_BGR2GRAY, 0, cuda_stream_);
-        }
-        else
-        {
-            d_left_gray_ = d_left_;
-            d_right_gray_ = d_right_;
+        // Convert BGR to RGB and to float32
+        cv::Mat left_rgb, right_rgb;
+        if (left.channels() == 3) {
+            cv::cvtColor(left, left_rgb, cv::COLOR_BGR2RGB);
+            cv::cvtColor(right, right_rgb, cv::COLOR_BGR2RGB);
+        } else {
+            cv::cvtColor(left, left_rgb, cv::COLOR_GRAY2RGB);
+            cv::cvtColor(right, right_rgb, cv::COLOR_GRAY2RGB);
         }
 
-        // Reduce resolution by half BEFORE rectification for efficiency
-        // (uses pre-scaled calibration maps for proper rectification at half resolution)
-        cv::cuda::resize(d_left_gray_, d_left_gray_, cv::Size(d_left_gray_.cols / 2, d_left_gray_.rows / 2), 0, 0, cv::INTER_LINEAR, cuda_stream_);
-        cv::cuda::resize(d_right_gray_, d_right_gray_, cv::Size(d_right_gray_.cols / 2, d_right_gray_.rows / 2), 0, 0, cv::INTER_LINEAR, cuda_stream_);
+        // Convert to float32 for preprocessing
+        left_rgb.convertTo(left_rgb, CV_32FC3);
+        right_rgb.convertTo(right_rgb, CV_32FC3);
 
-        // Rectify downsampled images using scaled calibration maps (GPU-accelerated)
-        if (have_calibration_)
-        {
-            cv::cuda::remap(d_left_gray_, d_left_rect_, d_map_l_x_, d_map_l_y_, cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0, cuda_stream_);
-            cv::cuda::remap(d_right_gray_, d_right_rect_, d_map_r_x_, d_map_r_y_, cv::INTER_LINEAR, cv::BORDER_CONSTANT, 0, cuda_stream_);
-            d_left_gray_ = d_left_rect_;
-            d_right_gray_ = d_right_rect_;
+        // Preprocess images
+        const auto& left_data = left_preproc_->process(left_rgb);
+        const auto& right_data = right_preproc_->process(right_rgb);
+
+        // Warmup on first frame
+        if (!warmup_done_) {
+            RCLCPP_INFO(this->get_logger(), "Warming up TensorRT engine (%d iterations)...", warmup_iterations_);
+            engine_->warmup(left_data, right_data, warmup_iterations_);
+            warmup_done_ = true;
+            RCLCPP_INFO(this->get_logger(), "✓ Warmup complete");
         }
 
-        // Compute disparity on GPU
-        try
-        {
-            if (use_sgm_)
-                stereo_sgm_->compute(d_left_gray_, d_right_gray_, d_disparity_, cuda_stream_);
-            else
-                stereo_bm_->compute(d_left_gray_, d_right_gray_, d_disparity_, cuda_stream_);
-        }
-        catch (const cv::Exception& e)
-        {
-            // If SGM fails at runtime, switch to BM permanently
-            if (use_sgm_)
-            {
-                RCLCPP_ERROR(this->get_logger(), "CUDA StereoSGM runtime error, switching to StereoBM: %s", e.what());
-                stereo_bm_ = cv::cuda::createStereoBM(num_disp_, 9);
-                use_sgm_ = false;
-                stereo_bm_->compute(d_left_gray_, d_right_gray_, d_disparity_, cuda_stream_);
-            }
-            else
-            {
-                throw;
+        // Run inference
+        engine_->infer(left_data, right_data);
+
+        // Get output disparity
+        const auto& disp_output = engine_->getOutput();
+        int out_h = engine_->outputHeight();
+        int out_w = engine_->outputWidth();
+
+        // Convert disparity to 8-bit normalized image
+        cv::Mat disp_8u(out_h, out_w, CV_8UC1);
+        for (int y = 0; y < out_h; y++) {
+            for (int x = 0; x < out_w; x++) {
+                float d = std::max(0.0f, std::min(disp_output[y * out_w + x] / (float)max_disparity_, 1.0f));
+                disp_8u.at<uchar>(y, x) = static_cast<uchar>(d * 255);
             }
         }
 
-        // Wait for GPU operations to complete
-        cuda_stream_.waitForCompletion();
-
-        // Single download from GPU to CPU
-        cv::Mat disp_raw;
-        d_disparity_.download(disp_raw);
-
-        // Minimal CPU post-processing
-        // Convert from fixed-point (16-bit) to float
-        cv::Mat disp_float;
-        disp_raw.convertTo(disp_float, CV_32F, 1.0 / 16.0);
-
-        // Mask invalid disparities (StereoSGM uses negative values for invalid)
-        cv::Mat valid_mask = (disp_float > 0) & (disp_float < num_disp_);
-
-        // Convert to 8-bit for visualization
-        cv::Mat disp_8u;
-        cv::normalize(disp_float, disp_8u, 0, 255, cv::NORM_MINMAX, CV_8U);
-
-        // Apply median filter on CPU (CUDA median doesn't support signed 16-bit)
-        if (median_kernel_ > 0)
-        {
-            cv::medianBlur(disp_8u, disp_8u, median_kernel_);
-        }
-
-        // Mask out invalid regions
-        disp_8u.setTo(0, ~valid_mask);
-
-        // Publish raw disparity (8-bit normalized, 0=invalid, 1-255=valid disparity)
-        // GUI node will colorize it
+        // Publish disparity
         auto disp_msg = matToMsg(disp_8u, left_msg->header, "mono8");
         disparity_pub_->publish(disp_msg);
+
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+
+        // Log performance periodically
+        frame_count_++;
+        total_time_ms_ += ms;
+        if (frame_count_ % 30 == 0) {
+            double avg_ms = total_time_ms_ / frame_count_;
+            double fps = 1000.0 / avg_ms;
+            RCLCPP_INFO(this->get_logger(), "Frame %d | %.1fms | %.1f FPS", frame_count_, ms, fps);
+        }
     }
 
     cv::Mat msgToMat(const sensor_msgs::msg::Image::ConstSharedPtr& msg)
@@ -258,83 +395,12 @@ private:
         return msg;
     }
 
-    // CUDA stereo matchers
-    cv::Ptr<cv::cuda::StereoSGM> stereo_sgm_;
-    cv::Ptr<cv::cuda::StereoBM> stereo_bm_;
-    bool use_sgm_;
+    // TensorRT engine
+    std::unique_ptr<StereoTRTEngine> engine_;
 
-    // Load calibration maps from config file
-    void loadCalibration()
-    {
-        try
-        {
-            std::string config_path = ament_index_cpp::get_package_share_directory("visionconnect") + "/config/calibration.yaml";
-            cv::FileStorage fs(config_path, cv::FileStorage::READ);
-
-            if (!fs.isOpened())
-            {
-                RCLCPP_WARN(this->get_logger(), "Could not open calibration file: %s", config_path.c_str());
-                have_calibration_ = false;
-                return;
-            }
-
-            // Load calibration maps
-            cv::Mat map_l_x, map_l_y, map_r_x, map_r_y;
-            fs["map_l_x"] >> map_l_x;
-            fs["map_l_y"] >> map_l_y;
-            fs["map_r_x"] >> map_r_x;
-            fs["map_r_y"] >> map_r_y;
-            fs.release();
-
-            if (map_l_x.empty() || map_l_y.empty() || map_r_x.empty() || map_r_y.empty())
-            {
-                RCLCPP_WARN(this->get_logger(), "Calibration maps are empty!");
-                have_calibration_ = false;
-                return;
-            }
-
-            // Scale calibration maps by 0.5 for half-resolution matching
-            // This maintains proper calibration for downsampled images
-            cv::resize(map_l_x, map_l_x, cv::Size(map_l_x.cols / 2, map_l_x.rows / 2), 0, 0, cv::INTER_LINEAR);
-            cv::resize(map_l_y, map_l_y, cv::Size(map_l_y.cols / 2, map_l_y.rows / 2), 0, 0, cv::INTER_LINEAR);
-            cv::resize(map_r_x, map_r_x, cv::Size(map_r_x.cols / 2, map_r_x.rows / 2), 0, 0, cv::INTER_LINEAR);
-            cv::resize(map_r_y, map_r_y, cv::Size(map_r_y.cols / 2, map_r_y.rows / 2), 0, 0, cv::INTER_LINEAR);
-
-            // Scale map values by 0.5 to correspond to half-resolution coordinates
-            map_l_x *= 0.5f;
-            map_l_y *= 0.5f;
-            map_r_x *= 0.5f;
-            map_r_y *= 0.5f;
-
-            // Upload scaled maps to GPU for CUDA remap
-            d_map_l_x_.upload(map_l_x);
-            d_map_l_y_.upload(map_l_y);
-            d_map_r_x_.upload(map_r_x);
-            d_map_r_y_.upload(map_r_y);
-
-            have_calibration_ = true;
-            RCLCPP_INFO(this->get_logger(), "✓ Loaded and scaled calibration maps from: %s", config_path.c_str());
-        }
-        catch (const std::exception& e)
-        {
-            RCLCPP_WARN(this->get_logger(), "Failed to load calibration: %s", e.what());
-            have_calibration_ = false;
-        }
-    }
-
-    // GPU memory (pre-allocated, reused every frame)
-    cv::cuda::GpuMat d_left_, d_right_;
-    cv::cuda::GpuMat d_left_gray_, d_right_gray_;
-    cv::cuda::GpuMat d_left_rect_, d_right_rect_;
-    cv::cuda::GpuMat d_disparity_;
-
-    // Calibration maps on GPU
-    cv::cuda::GpuMat d_map_l_x_, d_map_l_y_;
-    cv::cuda::GpuMat d_map_r_x_, d_map_r_y_;
-    bool have_calibration_ = false;
-
-    // CUDA stream for async operations
-    cv::cuda::Stream cuda_stream_;
+    // Preprocessors
+    std::unique_ptr<StereoPreprocessor> left_preproc_;
+    std::unique_ptr<StereoPreprocessor> right_preproc_;
 
     // Subscribers and synchronizer
     message_filters::Subscriber<sensor_msgs::msg::Image> left_sub_;
@@ -346,8 +412,13 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr disparity_pub_;
 
     // Parameters
-    int num_disp_;
-    int median_kernel_;
+    double max_disparity_;
+    int warmup_iterations_;
+    bool warmup_done_;
+
+    // Performance tracking
+    int frame_count_ = 0;
+    double total_time_ms_ = 0.0;
 };
 
 int main(int argc, char** argv)

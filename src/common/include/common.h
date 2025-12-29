@@ -24,6 +24,7 @@ void convert_message_to_frame( const sensor_msgs::ImageConstPtr msg, cv::Mat &fr
 const std::map<std::string,int> cv_map ={
     {"mono8",   CV_8UC1},   // QImage::Format_Grayscale8
     {"bgr8",    CV_8UC3},   // QImage::Format_BGR888
+    {"rgb8",    CV_8UC3},   // RGB format (same CV type, different channel order)
     {"mono16",  CV_16SC1},  // QImage::Format_Grayscale16
     {"rgba8",   CV_8UC4}    // QImage::Format_RGBA8888
 };
