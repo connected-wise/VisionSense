@@ -1,262 +1,522 @@
 # VisionSense
 
-A ROS2-based computer vision system for autonomous vehicles on NVIDIA Jetson platforms with JetPack 6.2.
+<p align="center">
+  <img src="assets/Logo_Symbol_Dark.png" alt="VisionSense Logo" width="150"/>
+</p>
+
+<p align="center">
+  <b>Advanced Autonomous Vehicle Vision System</b><br>
+  Real-time perception powered by TensorRT on NVIDIA Jetson
+</p>
+
+<p align="center">
+  <a href="#features">Features</a> •
+  <a href="#system-architecture">Architecture</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#usage">Usage</a> •
+  <a href="#nodes">Nodes</a>
+</p>
+
+---
 
 https://github.com/user-attachments/assets/8b5bfc2b-9bf6-4562-895b-04ba0c5b41e3
 
-
-
-
 ## Overview
 
-VisionSense provides real-time:
-- Object detection using YOLOv8 with TensorRT
-- Lane detection with neural networks
-- Traffic sign classification
-- Multi-object tracking with BYTE tracker
-- Web dashboard for monitoring
-- Native GUI with data fusion
+VisionSense is a comprehensive ROS2-based computer vision system designed for autonomous vehicles running on NVIDIA Jetson platforms with JetPack 6.2. It provides a complete perception pipeline with real-time object detection, lane detection, traffic sign recognition, stereo depth estimation, and driver monitoring capabilities.
+
+## Features
+
+| Feature | Description | Model/Method |
+|---------|-------------|--------------|
+| **Object Detection** | Detect vehicles, pedestrians, cyclists, traffic signs/lights | YOLOv8 + TensorRT |
+| **Multi-Object Tracking** | Track objects across frames with unique IDs | BYTE Tracker + Kalman Filter |
+| **Lane Detection** | Segment and detect lane lines | Neural Network + TensorRT |
+| **Traffic Sign Recognition** | Classify 50+ traffic sign types | YOLOv8 Classifier + TensorRT |
+| **Stereo Depth Estimation** | Dense depth maps from stereo camera | LightStereo + TensorRT |
+| **Driver Monitoring** | Face detection and gaze estimation | YOLOv11 + ResNet18 + TensorRT |
+| **Data Fusion GUI** | Real-time visualization of all perception data | OpenCV + X11 |
+| **Web Dashboard** | Remote monitoring interface | HTTP Server |
+
+## System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            VisionSense Architecture                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                │
+│   │ Mono Camera  │     │Stereo Camera │     │   IMU/GPS    │                │
+│   │  (CSI/USB)   │     │  (Arducam)   │     │   Module     │                │
+│   └──────┬───────┘     └──────┬───────┘     └──────┬───────┘                │
+│          │                    │                    │                         │
+│          ▼                    ▼                    ▼                         │
+│   ┌──────────────┐     ┌──────────────┐     ┌──────────────┐                │
+│   │    camera    │     │ camera_stereo│     │   imu_gps    │                │
+│   │     node     │     │     node     │     │     node     │                │
+│   └──────┬───────┘     └──────┬───────┘     └──────┬───────┘                │
+│          │                    │                    │                         │
+│          ▼                    ├────────┬───────────┘                         │
+│   ┌──────────────┐            │        │                                     │
+│   │   driver     │            ▼        ▼                                     │
+│   │   monitor    │     ┌─────────┐ ┌─────────┐                               │
+│   └──────┬───────┘     │ detect  │ │ stereo  │                               │
+│          │             │  node   │ │  depth  │                               │
+│          │             └────┬────┘ └────┬────┘                               │
+│          │                  │           │                                    │
+│          │             ┌────┴────┐      │                                    │
+│          │             ▼         ▼      │                                    │
+│          │      ┌─────────┐ ┌─────────┐ │                                    │
+│          │      │classify │ │ lanedet │ │                                    │
+│          │      │  node   │ │  node   │ │                                    │
+│          │      └────┬────┘ └────┬────┘ │                                    │
+│          │           │           │      │                                    │
+│          │           └─────┬─────┘      │                                    │
+│          │                 │            │                                    │
+│          │                 ▼            │                                    │
+│          │          ┌──────────┐        │                                    │
+│          │          │   adas   │        │                                    │
+│          │          │   node   │        │                                    │
+│          │          └────┬─────┘        │                                    │
+│          │               │              │                                    │
+│          └───────────────┼──────────────┘                                    │
+│                          ▼                                                   │
+│                   ┌──────────────┐     ┌──────────────┐                      │
+│                   │     GUI      │     │  Dashboard   │                      │
+│                   │  (Display)   │     │    (Web)     │                      │
+│                   └──────────────┘     └──────────────┘                      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
 ## System Requirements
 
-- **Hardware**: NVIDIA Jetson Orin or Xavier
-- **OS**: Ubuntu 22.04 (JetPack 6.2)
-- **ROS2**: Humble or newer
-- **CUDA**: 12.6 (included in JetPack 6.2)
-- **TensorRT**: 10.x (included in JetPack 6.2)
+| Component | Requirement |
+|-----------|-------------|
+| **Hardware** | NVIDIA Jetson Orin Nano/NX/AGX |
+| **OS** | Ubuntu 22.04 (JetPack 6.2) |
+| **ROS2** | Humble Hawksbill |
+| **CUDA** | 12.6+ |
+| **TensorRT** | 10.x |
+| **OpenCV** | 4.x with CUDA support |
 
-## Prerequisites Installation
+---
 
-### 1. Install ROS2 Humble
+## Nodes
+
+### 1. Camera Node (`camera`)
+
+Captures video from mono cameras (CSI or USB) for driver monitoring.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `resource` | string | `csi://0` | Camera source URI |
+| `width` | int | 1280 | Frame width |
+| `height` | int | 720 | Frame height |
+
+**Topics Published:**
+- `/camera/raw` (`sensor_msgs/Image`) - Raw camera frames
+
+**Supported Sources:**
+- CSI Camera: `csi://0`
+- USB Camera: `v4l2:///dev/video0`
+- Video File: `file:///path/to/video.mp4`
+
+---
+
+### 2. Stereo Camera Node (`camera_stereo`)
+
+Handles Arducam stereo camera with synchronized left/right image capture and CUDA-accelerated rotation.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `resource` | string | `/dev/video1` | V4L2 device path |
+| `width` | int | 3840 | Full stereo width (1920×2) |
+| `height` | int | 1200 | Stereo height |
+| `framerate` | int | 30 | Capture framerate |
+| `rotated_lenses` | bool | true | Apply 90° rotation to each eye |
+
+**Topics Published:**
+- `/camera_stereo/left/image_raw` (`sensor_msgs/Image`) - Left camera (1200×1200)
+- `/camera_stereo/right/image_raw` (`sensor_msgs/Image`) - Right camera (1200×1200)
+
+**CUDA Kernels:**
+- Left eye: 90° counter-clockwise rotation
+- Right eye: 90° clockwise rotation
+
+---
+
+### 3. Stereo Depth Node (`stereo_depth`)
+
+Computes dense depth maps using LightStereo neural network with TensorRT acceleration.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | string | `LightStereo-S-KITTI.engine` | TensorRT engine path |
+| `max_disparity` | float | 192.0 | Maximum disparity value |
+| `warmup_iterations` | int | 5 | Model warmup runs |
+
+**Topics Subscribed:**
+- `left/image_raw` (`sensor_msgs/Image`) - Left stereo image
+- `right/image_raw` (`sensor_msgs/Image`) - Right stereo image
+
+**Topics Published:**
+- `/stereo_depth/disparity` (`sensor_msgs/Image`) - Colorized disparity map
+- `/stereo_depth/depth` (`sensor_msgs/Image`) - Depth image (meters)
+
+**Model Specifications:**
+- Input: 1200×1200 stereo pair
+- Output: Dense disparity map
+- Architecture: LightStereo-S (KITTI trained)
+
+---
+
+### 4. Object Detection Node (`detect`)
+
+Real-time object detection using YOLOv8 with TensorRT and multi-object tracking.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | string | `detect.engine` | TensorRT engine path |
+| `labels` | string | `labels_detect.txt` | Class labels file |
+| `thresholds` | float[] | [0.40, 0.45, ...] | Per-class confidence thresholds |
+| `track_frame_rate` | int | 30 | Tracking frame rate |
+| `track_buffer` | int | 30 | Lost track buffer size |
+
+**Detected Classes:**
+| ID | Class | Threshold |
+|----|-------|-----------|
+| 0 | Pedestrian | 0.45 |
+| 1 | Cyclist | 0.45 |
+| 2 | Vehicle-Car | 0.60 |
+| 3 | Vehicle-Bus | 0.45 |
+| 4 | Vehicle-Truck | 0.45 |
+| 5 | Train | 0.50 |
+| 6 | Traffic Light | 0.40 |
+| 7 | Traffic Sign | 0.55 |
+
+**Topics Subscribed:**
+- `/detect/image_in` (`sensor_msgs/Image`) - Input image
+
+**Topics Published:**
+- `/detect/detections` (`visionconnect/Detect`) - Detection results with tracking
+- `/detect/signs` (`visionconnect/Signs`) - Cropped traffic signs for classification
+
+**Tracking Features:**
+- BYTE tracker with Kalman filter prediction
+- Unique ID assignment per tracked object
+- ID format: `{ClassName}_{ID}` (e.g., `Car_001`, `Pedestrian_003`)
+
+---
+
+### 5. Traffic Sign Classification Node (`classify`)
+
+Classifies detected traffic signs and lights into 50+ categories.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | string | `classify.engine` | TensorRT engine path |
+| `labels` | string | `labels_classify.txt` | Class labels file |
+| `thresholds` | float[] | [0.30, 0.75] | Traffic light/sign thresholds |
+
+**Supported Sign Categories:**
+- **Traffic Lights:** Red, Yellow, Green
+- **Regulatory Signs:** Stop, Yield, Speed Limits (15-70 mph), No Entry, No U-Turn, etc.
+- **Warning Signs:** Curve Ahead, Intersection, School Zone, Road Work, etc.
+- **Guide Signs:** Lane Markers, Merge, Highway Signs
+
+**Topics Subscribed:**
+- `/classify/signs_in` (`visionconnect/Signs`) - Cropped sign images
+
+**Topics Published:**
+- `/classify/signs` (`visionconnect/Signs`) - Classified signs with labels
+
+---
+
+### 6. Lane Detection Node (`lanedet`)
+
+Detects and segments lane lines using neural network inference.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | string | `lane_detect.engine` | TensorRT engine path |
+
+**Topics Subscribed:**
+- `/lanedet/image_in` (`sensor_msgs/Image`) - Input image
+
+**Topics Published:**
+- `/lanedet/lanes` (`visionconnect/Lanes`) - Detected lane data
+  - `xs`, `ys`: Lane point coordinates
+  - `probs`: Lane confidence (4 lanes max)
+  - `num_lanes`: Number of detected lanes
+  - `laneimg`: Visualization overlay
+
+**Output:**
+- Up to 4 lane lines detected
+- Polyline representation with confidence scores
+- Segmentation mask overlay
+
+---
+
+### 7. Driver Monitoring Node (`driver_monitor`)
+
+TensorRT-accelerated driver attention monitoring using face detection and gaze estimation.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `face_engine` | string | `yolov11n_face_fp16.engine` | Face detection model |
+| `gaze_engine` | string | `resnet18_gaze_fp16.engine` | Gaze estimation model |
+| `camera_topic` | string | `/camera/raw` | Input camera topic |
+| `confidence` | float | 0.5 | Face detection threshold |
+
+**Driver States:**
+| State | Condition | Alert |
+|-------|-----------|-------|
+| `ALERT` | Face detected, gaze forward | No |
+| `DISTRACTED` | Gaze >30° off-center for 2s | Yes |
+| `DROWSY` | Eyes closed (future) | Yes |
+| `NO_DRIVER` | No face detected for 1s | Yes |
+
+**Topics Subscribed:**
+- `/camera/raw` (`sensor_msgs/Image`) - Driver-facing camera
+
+**Topics Published:**
+- `/driver_monitor/image` (`sensor_msgs/Image`) - Annotated output with gaze arrow
+- `/driver_monitor/state` (`std_msgs/String`) - Current driver state
+- `/driver_monitor/alert` (`std_msgs/Bool`) - Alert flag
+
+**Models:**
+- **Face Detection:** YOLOv11-nano (640×640 input, 8400 detections)
+- **Gaze Estimation:** ResNet18 (448×448 input, pitch/yaw angles)
+
+---
+
+### 8. ADAS Node (`adas`)
+
+Advanced Driver Assistance System alerts based on lane and detection data.
+
+**Topics Subscribed:**
+- `/adas/lanes_in` (`visionconnect/Lanes`) - Lane detection data
+
+**Topics Published:**
+- `/adas/adas_alerts` (`visionconnect/ADAS`) - ADAS warnings
+
+**Alerts:**
+- Lane departure warning
+- Forward collision warning (with depth data)
+
+---
+
+### 9. IMU/GPS Node (`imu_gps`)
+
+Sensor fusion for IMU and GPS data (BNO055 + GPS module).
+
+**Topics Published:**
+- `/imu_gps/imu/data` (`sensor_msgs/Imu`) - IMU orientation and acceleration
+- `/imu_gps/gps/fix` (`sensor_msgs/NavSatFix`) - GPS coordinates
+
+---
+
+### 10. GUI Node (`gui`)
+
+Real-time data fusion display with multi-panel layout.
+
+**Layout:**
+```
+┌────────────────────────────┬─────────────────┐
+│                            │ Driver Monitor  │
+│                            │   (1/3 × 1/3)   │
+│       Main View            ├─────────────────┤
+│    (2/3 × Full Height)     │  Stereo Depth   │
+│                            │   (1/3 × 1/3)   │
+│    Object Detection +      ├─────────────────┤
+│    Lane Overlay +          │    Summary      │
+│    Traffic Signs           │   (1/3 × 1/3)   │
+│                            │  Speed/GPS/IMU  │
+└────────────────────────────┴─────────────────┘
+```
+
+**Topics Subscribed:**
+- `/gui/image_in` - Main camera feed
+- `/gui/detect_in` - Detection results
+- `/gui/signs_in` - Classified signs
+- `/gui/lanes_in` - Lane detection
+- `/gui/adas_in` - ADAS alerts
+- `/driver_monitor/image` - Driver monitor feed
+- `/stereo_depth/disparity` - Depth visualization
+- `/imu_gps/imu/data` - IMU data
+- `/imu_gps/gps/fix` - GPS coordinates
+
+---
+
+### 11. Dashboard Node (`dashboard`)
+
+Web-based monitoring interface accessible via browser.
+
+**Access:** `http://<jetson-ip>:8080`
+
+**Features:**
+- Live video stream
+- Detection statistics
+- System status
+
+---
+
+## Installation
+
+### Prerequisites
 
 ```bash
-# Add ROS2 repository
-sudo apt update && sudo apt install -y software-properties-common
-sudo add-apt-repository universe
-sudo apt update && sudo apt install -y curl
-sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
-
 # Install ROS2 Humble
-sudo apt update
-sudo apt install -y ros-humble-desktop ros-humble-vision-msgs python3-colcon-common-extensions
+sudo apt update && sudo apt install -y ros-humble-desktop ros-humble-vision-msgs python3-colcon-common-extensions
+
+# Install dependencies
+sudo apt install -y build-essential cmake git libeigen3-dev libopencv-dev v4l-utils qtbase5-dev
+
+# Install jetson-inference
+cd ~ && git clone --recursive https://github.com/dusty-nv/jetson-inference
+cd jetson-inference && mkdir build && cd build
+cmake ../ && make -j$(nproc) && sudo make install && sudo ldconfig
 ```
 
-### 2. Install System Dependencies
+### Build VisionSense
 
 ```bash
-# Update package list
-sudo apt update
-
-# Install build tools and libraries
-sudo apt install -y \
-    build-essential \
-    cmake \
-    git \
-    pkg-config \
-    python3-pip \
-    python3-dev \
-    python3-numpy \
-    libeigen3-dev \
-    libgstreamer1.0-dev \
-    libgstreamer-plugins-base1.0-dev \
-    qtbase5-dev \
-    qtchooser \
-    qt5-qmake \
-    qtbase5-dev-tools \
-    libqt5webkit5-dev \
-    libqt5opengl5-dev \
-    libqt5svg5-dev \
-    libopencv-dev \
-    v4l-utils
-
-# Install Python ROS2 dependencies for message generation
-sudo apt install -y \
-    python3-rosidl-generator-py \
-    ros-humble-rosidl-typesupport-introspection-cpp \
-    ros-humble-rosidl-typesupport-introspection-c
-```
-
-### 3. Install Jetson Libraries
-
-```bash
-# Clone and build jetson-inference (includes jetson-utils)
-cd ~
-git clone --recursive --depth=1 https://github.com/dusty-nv/jetson-inference
-cd jetson-inference
-mkdir build && cd build
-cmake ../
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-```
-
-### 4. Install Python Dependencies
-
-```bash
-cd /path/to/VisionSense
-pip3 install -r requirements.txt
-```
-
-## Building VisionSense
-
-1. Clone the repository:
-```bash
-git clone https://github.com/your-repo/VisionSense.git
+# Clone repository
+git clone https://github.com/connected-wise/VisionSense.git
 cd VisionSense
+
+# Build
+source /opt/ros/humble/setup.bash
+colcon build --packages-select visionconnect
 ```
 
-2. Source ROS2 environment:
+## Usage
+
+### Desktop Launcher
+Double-click the **VisionSense** icon on the desktop.
+
+### Command Line
 ```bash
 source /opt/ros/humble/setup.bash
+cd ~/VisionSense && source install/setup.bash
+ros2 launch visionconnect visionsense.launch.py
 ```
 
-3. Build the package:
+### Individual Nodes
 ```bash
-colcon build --packages-select visionconnect --cmake-args -DBUILD_TESTING=OFF
+ros2 run visionconnect camera
+ros2 run visionconnect detect
+ros2 run visionconnect gui
 ```
 
 ## Configuration
 
-Edit `config/config.yaml` to configure:
-- Camera source (USB, CSI, or video file)
-- Model paths and detection thresholds
-- Sensor enable/disable flags
+Edit `config/config.yaml`:
 
-Example camera configurations:
 ```yaml
+sensors:
+    uv_camera:     true    # Mono camera for driver monitoring
+    zed_camera:    true    # Stereo camera
+    gps_module:    true    # GPS/IMU module
+
 camera:
     ros__parameters:
-        # For USB camera:
-        resource: "v4l2:///dev/video0"
-        
-        # For CSI camera:
-        # resource: "csi://0"
-        
-        # For video file:
-        # resource: "file:///path/to/video.mp4"
-        
-        width: 1920
-        height: 1080
-        flip: ""  # Options: "", "rotate-180", "flip-horizontal", etc.
-```
+        resource:   "csi://0"
+        width:      1280
+        height:     720
 
-## Running the System
+camera_stereo:
+    ros__parameters:
+        resource:       "/dev/video1"
+        width:          3840
+        height:         1200
+        rotated_lenses: true
 
-### Option 1: Using the Launch Script (Recommended)
-```bash
-# Make sure executables exist
-cd build/visionconnect
-ls camera detect classify lanedet dashboard gui
+detect:
+    ros__parameters:
+        model:      "detect.engine"
+        thresholds: [0.40, 0.45, 0.45, 0.6, 0.45, 0.45, 0.5, 0.40, 0.55]
 
-# If executables exist, run:
-cd ../..
-./run_nodes.sh
-```
-
-### Option 2: Running Individual Nodes
-```bash
-# Source ROS2
-source /opt/ros/humble/setup.bash
-
-# Run camera node
-./build/visionconnect/camera --ros-args \
-    -p resource:="file:///path/to/video.mp4" \
-    -p width:=1920 \
-    -p height:=1080
-
-# In separate terminals, run other nodes...
-```
-
-### Option 3: Using ROS2 Launch (if Python bindings are installed)
-```bash
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch visionconnect test.launch.py
+driver_monitor:
+    ros__parameters:
+        face_engine: "/path/to/yolov11n_face_fp16.engine"
+        gaze_engine: "/path/to/resnet18_gaze_fp16.engine"
+        confidence:  0.5
 ```
 
 ## Neural Network Models
 
-Place the following TensorRT engine files in the project root:
-- `yolov8s-detect.engine` - Object detection model
-- `yolov8n-TSR.engine` - Traffic sign classification model  
-- `lane_detect.engine` - Lane detection model
+| Model | Purpose | Input Size | Format |
+|-------|---------|------------|--------|
+| `detect.engine` | Object Detection | 640×640 | TensorRT FP16 |
+| `classify.engine` | Sign Classification | 224×224 | TensorRT FP16 |
+| `lane_detect.engine` | Lane Detection | 800×288 | TensorRT FP16 |
+| `LightStereo-S-KITTI.engine` | Stereo Depth | 1200×1200 | TensorRT FP16 |
+| `yolov11n_face_fp16.engine` | Face Detection | 640×640 | TensorRT FP16 |
+| `resnet18_gaze_fp16.engine` | Gaze Estimation | 448×448 | TensorRT FP16 |
 
-Also required:
-- `labels_detect.txt` - Object class labels
-- `labels_classify.txt` - Traffic sign class labels
+## ROS2 Topics Overview
+
+```
+/camera/raw                    - Mono camera output
+/camera_stereo/left/image_raw  - Left stereo image
+/camera_stereo/right/image_raw - Right stereo image
+/stereo_depth/disparity        - Depth visualization
+/detect/detections             - Object detections with tracking
+/detect/signs                  - Detected traffic signs
+/classify/signs                - Classified traffic signs
+/lanedet/lanes                 - Lane detection results
+/driver_monitor/image          - Driver monitoring visualization
+/driver_monitor/state          - Driver state (ALERT/DISTRACTED/etc)
+/adas/adas_alerts              - ADAS warnings
+/imu_gps/imu/data              - IMU sensor data
+/imu_gps/gps/fix               - GPS coordinates
+/gui/fusion                    - Fused visualization output
+```
 
 ## Troubleshooting
 
-### Missing Executables
-If nodes like `detect`, `classify`, etc. are missing:
-1. Check build logs for errors
-2. Ensure all dependencies are installed
-3. Try a clean rebuild:
-   ```bash
-   rm -rf build install log
-   colcon build --packages-select visionconnect
-   ```
-
 ### Camera Issues
-- **USB Camera**: Check with `v4l2-ctl --list-devices`
-- **CSI Camera**: Ensure camera is properly connected
-- **Video File**: Use absolute paths starting with `file:///`
-
-### Library Loading Errors
 ```bash
-# Add library paths
-export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-sudo ldconfig
+# List available cameras
+v4l2-ctl --list-devices
+
+# Test stereo camera
+gst-launch-1.0 v4l2src device=/dev/video1 ! videoconvert ! autovideosink
 ```
 
-### OpenCV CUDA Support
-This build includes fallback implementations if OpenCV CUDA is not available. For better performance, consider building OpenCV with CUDA support.
-
-## Web Dashboard
-
-Once running, access the dashboard at: http://localhost:8080
-
-## Project Structure
-
-```
-VisionSense/
-├── src/
-│   ├── nodes/          # ROS2 node implementations
-│   ├── common/         # Shared libraries and utilities
-│   └── graphs/         # Neural network model files
-├── config/             # Configuration files
-├── launch/             # ROS2 launch files
-├── msg/                # Custom message definitions
-└── scripts/            # Utility scripts
+### Build Errors
+```bash
+# Clean rebuild
+rm -rf build install log
+colcon build --packages-select visionconnect
 ```
 
-## Known Issues on JetPack 6.2
-
-1. **VPI Version**: Project requires VPI 3 (included in JetPack 6.2)
-2. **TensorRT API**: Uses TensorRT 10.x APIs
-3. **Python Bindings**: May require manual installation of ROS2 Python packages
+### TensorRT Issues
+Ensure models are built for your specific Jetson platform (engine files are not portable).
 
 ## License
 
-VisionSense is licensed for **non-commercial research and educational use only**. 
+VisionSense is licensed for **non-commercial research and educational use only**.
 
-✅ **Allowed:** Research, education, testing, and developing your own distinct technologies  
-❌ **Not Allowed:** Direct commercial use, integration into commercial products, or offering as a service  
+✅ **Allowed:** Research, education, testing, developing your own technologies
+❌ **Not Allowed:** Commercial use, integration into products, offering as a service
 💼 **Commercial License:** Contact licensing@connectedwise.com
 
-See [![License: Non-Commercial](https://img.shields.io/badge/License-Non--Commercial-blue.svg)](LICENSE) for full terms.
+See [LICENSE](LICENSE) for full terms.
 
 ## Contributing
 
-We welcome research contributions! To contribute:
-
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Commit your changes (`git commit -m 'feat: add feature'`)
-4. Push to the branch (`git push origin feature/my-feature`)
+3. Commit changes (`git commit -m 'feat: add feature'`)
+4. Push to branch (`git push origin feature/my-feature`)
 5. Open a Pull Request
 
-Please follow existing code style, test your changes, and use [conventional commits](https://www.conventionalcommits.org/). 
+---
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+<p align="center">
+  <b>VisionSense</b> - Autonomous Vehicle Vision System<br>
+  © 2025 ConnectedWise
+</p>
