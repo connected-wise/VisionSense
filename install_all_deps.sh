@@ -133,7 +133,20 @@ echo -e "\n9. Installing Python packages..."
 pip3 install --upgrade pip
 pip3 install numpy pyserial
 
-echo -e "\n10. Checking jetson-inference installation..."
+echo -e "\n10. Fixing npymath library for newer NumPy versions..."
+# NumPy >= 1.24 moved/removed npymath from standard paths, causing jetson-inference build to fail
+NPYMATH_SRC="/usr/lib/python3/dist-packages/numpy/core/lib/libnpymath.a"
+if [ -f "$NPYMATH_SRC" ] && [ ! -f /usr/lib/libnpymath.a ]; then
+    echo "Creating symlink for npymath library..."
+    sudo ln -sf "$NPYMATH_SRC" /usr/lib/libnpymath.a
+    echo "✓ npymath symlink created"
+elif [ -f /usr/lib/libnpymath.a ]; then
+    echo "✓ npymath symlink already exists"
+else
+    echo "Warning: npymath library not found at $NPYMATH_SRC"
+fi
+
+echo -e "\n11. Checking jetson-inference installation..."
 if [ ! -d "/usr/local/include/jetson-utils" ]; then
     echo "jetson-inference not found. Installing..."
     cd ~
@@ -150,7 +163,7 @@ else
     echo "✓ jetson-inference already installed"
 fi
 
-echo -e "\n11. Verifying installations..."
+echo -e "\n12. Verifying installations..."
 echo "Checking CUDA..."
 nvcc --version || echo "✗ CUDA not found"
 
@@ -170,8 +183,8 @@ echo "======================================"
 echo ""
 echo "Next steps:"
 echo "1. Close and reopen your terminal (or run: source ~/.bashrc)"
-echo "2. Navigate to VisionConnect-Plus directory"
+echo "2. Navigate to VisionSense directory: cd ~/VisionSense"
 echo "3. Build with: colcon build --packages-select visionconnect"
-echo "4. Run with: ./run_nodes.sh"
+echo "4. Run with: ros2 launch visionconnect visionsense.launch.py"
 echo ""
-echo "If you encounter any issues, check INSTALL_JETPACK_6.2.md"
+echo "If you encounter any issues, check the README.md"

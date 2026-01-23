@@ -96,10 +96,9 @@ target_link_libraries(camera
 target_link_libraries(camera_stereo
     ${catkin_LIBRARIES}
     ${OpenCV_LIBRARIES}
-    jetson-inference
+    ${TENSORRT_LIBS}
     common
     stereo_rotate_cuda
-    cudart
 )
 target_link_libraries(detect
     ${catkin_LIBRARIES}
