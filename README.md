@@ -364,29 +364,44 @@ Web-based monitoring interface accessible via browser.
 
 ## Installation
 
-### Prerequisites
+### Step 1: Clone the Repository
 
 ```bash
-# Install ROS2 Humble
-sudo apt update && sudo apt install -y ros-humble-desktop ros-humble-vision-msgs python3-colcon-common-extensions
-
-# Install dependencies
-sudo apt install -y build-essential cmake git libeigen3-dev libopencv-dev v4l-utils qtbase5-dev
-
-# Install jetson-inference
-cd ~ && git clone --recursive https://github.com/dusty-nv/jetson-inference
-cd jetson-inference && mkdir build && cd build
-cmake ../ && make -j$(nproc) && sudo make install && sudo ldconfig
-```
-
-### Build VisionSense
-
-```bash
-# Clone repository
 git clone https://github.com/connected-wise/VisionSense.git
 cd VisionSense
+```
 
-# Build
+### Step 2: Install OpenCV with CUDA Support
+
+Build OpenCV from source with CUDA acceleration (required for Jetson):
+
+```bash
+sudo bash install_opencv_cuda_orin.sh
+```
+
+> **Note:** This process takes 2-3 hours. The script will:
+> - Install all OpenCV build dependencies
+> - Download and compile the latest OpenCV with CUDA 12.6 support
+> - Configure for Jetson Orin (compute capability 8.7)
+
+### Step 3: Install ROS2 and Project Dependencies
+
+Install ROS2 Humble, jetson-inference, and all required libraries:
+
+```bash
+sudo bash install_all_deps.sh
+```
+
+This script installs:
+- ROS2 Humble desktop and vision packages
+- Build tools (cmake, colcon, etc.)
+- jetson-inference library
+- Python dependencies (numpy, pyserial)
+- System libraries (Eigen3, Qt5, V4L utilities)
+
+### Step 4: Build VisionSense
+
+```bash
 source /opt/ros/humble/setup.bash
 colcon build --packages-select visionconnect
 ```
