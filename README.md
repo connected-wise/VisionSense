@@ -135,6 +135,7 @@ Handles Arducam stereo camera with synchronized left/right image capture and CUD
 | `height` | int | 1200 | Stereo height |
 | `framerate` | int | 30 | Capture framerate |
 | `rotated_lenses` | bool | true | Apply 90° rotation to each eye |
+| `flip` | string | `""` | Flip before split: `rotate-180`, `vertical-flip`, `horizontal-flip`, or empty |
 
 **Topics Published:**
 - `/camera_stereo/left/image_raw` (`sensor_msgs/Image`) - Left camera (1200×1200)
