@@ -168,8 +168,8 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	ROS_CREATE_PUBLISHER(sensor_msgs::Image, "left/image_raw", 10, left_image_pub);
-	ROS_CREATE_PUBLISHER(sensor_msgs::Image, "right/image_raw", 10, right_image_pub);
+	ROS_CREATE_PUBLISHER(sensor_msgs::Image, "left/image_raw", 2, left_image_pub);
+	ROS_CREATE_PUBLISHER(sensor_msgs::Image, "right/image_raw", 2, right_image_pub);
 	ROS_CREATE_PUBLISHER(std_msgs::msg::Float32, "framerate", 5, framerate_pub);
 	ROS_CREATE_PUBLISHER(std_msgs::msg::Header, "time", 5, timestamp_pub);
 

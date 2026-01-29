@@ -439,9 +439,9 @@ int main(int argc, char **argv)
     
     auto img_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "image_in", 1, img_callback);
 
-    ROS_CREATE_PUBLISHER(visionconnect::msg::Detect, "detections", 10, detect_pub);
-    ROS_CREATE_PUBLISHER(visionconnect::msg::Signs, "signs", 10, signs_pub);
-    ROS_CREATE_PUBLISHER(visionconnect::msg::Track, "tracks", 10, track_pub);
+    ROS_CREATE_PUBLISHER(visionconnect::msg::Detect, "detections", 2, detect_pub);
+    ROS_CREATE_PUBLISHER(visionconnect::msg::Signs, "signs", 2, signs_pub);
+    ROS_CREATE_PUBLISHER(visionconnect::msg::Track, "tracks", 2, track_pub);
 
 	// start publishing video frames
     ROS_INFO("Detect Node initialized, publishing detections...");

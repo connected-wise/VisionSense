@@ -56,28 +56,24 @@ def generate_launch_description():
             ("left/image_raw", "/camera_stereo/left/image_raw"),
             ("right/image_raw", "/camera_stereo/right/image_raw")
         ],
-        parameters=[{
-            "min_disparity": 0,
-            "num_disparities": 64,
-            "block_size": 9,
-            "p1_multiplier": 8,
-            "p2_multiplier": 32,
-            "uniqueness_ratio": 10,
-            "median_filter_size": 5
-        }]
+        parameters=[config["stereo_depth"]["ros__parameters"]]
     )
     ld.add_action(stereo_depth_node)
 
-    # Preview Node for Disparity Visualization
-    # Subscribe to disparity and display
+    # Preview Node for Stereo Cameras and Disparity
     preview_node = Node(
         package="visionconnect",
-        name="disparity_preview",
+        name="preview_stereo",
         executable="preview",
         output="screen",
-        parameters=[config["preview"]["ros__parameters"]],
+        additional_env={"DISPLAY": ":0"},
+        parameters=[{
+            'output': 'display://0'
+        }],
         remappings=[
-            ("disparity_in", "/stereo_depth/disparity")
+            ('left/image_in', '/camera_stereo/left/image_raw'),
+            ('right/image_in', '/camera_stereo/right/image_raw'),
+            ('disparity_in', '/stereo_depth/disparity')
         ]
     )
     ld.add_action(preview_node)

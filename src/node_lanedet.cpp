@@ -329,7 +329,7 @@ int main(int argc, char *argv[])
 
     auto img_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "image_in", 1, img_callback);
 
-    ROS_CREATE_PUBLISHER(visionconnect::msg::Lanes, "lanes", 10, lanedet_pub);
+    ROS_CREATE_PUBLISHER(visionconnect::msg::Lanes, "lanes", 2, lanedet_pub);
 
 	// start publishing video frames
     ROS_INFO("Lane Detection Node initialized, publishing lane lines...");

@@ -1248,8 +1248,8 @@ int main(int argc, char **argv)
     auto imu_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::Imu, "/imu_gps/imu/data", 2, imu_callback);
     auto gps_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::NavSatFix, "/imu_gps/gps/fix", 2, gps_callback);
 
-    ROS_CREATE_PUBLISHER(sensor_msgs::Image, "fusion", 5, gui_pub);
-    ROS_CREATE_PUBLISHER(visionconnect::msg::SceneData, "scene_data", 10, scene_pub);
+    ROS_CREATE_PUBLISHER(sensor_msgs::Image, "fusion", 2, gui_pub);
+    ROS_CREATE_PUBLISHER(visionconnect::msg::SceneData, "scene_data", 2, scene_pub);
 
     // start publishing video frames
     ROS_INFO("Preview Node initialized, waiting for images");

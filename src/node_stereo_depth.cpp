@@ -271,7 +271,7 @@ public:
 
         sync_ = std::make_shared<message_filters::TimeSynchronizer<
             sensor_msgs::msg::Image, sensor_msgs::msg::Image>>(
-            left_sub_, right_sub_, 10);
+            left_sub_, right_sub_, 2);
 
         sync_->registerCallback(
             std::bind(&StereoDepthNode::stereoCallback, this,
