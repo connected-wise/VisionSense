@@ -39,9 +39,10 @@ def generate_launch_description():
             'width': LaunchConfiguration('width'),
             'height': LaunchConfiguration('height'),
             'framerate': 30,
-            'flip': 'vertical',
             'latency': 0,       # Minimize GStreamer latency
-            'num_buffers': 4    # Keep at 4 for stability under load
+            'num_buffers': 4,   # Keep at 4 for stability under load
+            'rotated_lenses': False,
+            'flip': 'vertical-flip'  # Options: rotate-180, vertical-flip, horizontal-flip, or '' for none
         }],
         remappings=[
             ('left/image_raw', '/stereo/left/image_raw'),

@@ -15,7 +15,8 @@ camera_stereo:
         width:              3840        # Full stereo width (1920 left + 1920 right)
         height:             1200        # Stereo height (output will be 1200x1200 per eye)
         framerate:          30
-        rotated_lenses:     true        # true: rotate 90° after split, false: no rotation
+        rotated_lenses:     false        # true: rotate 90° after split, false: no rotation
+        flip:               "vertical-flip" # Options: rotate-180, vertical-flip, horizontal-flip, or "" for none
         disparity_range:    128
         sensor_width_mm:    5.76
 
