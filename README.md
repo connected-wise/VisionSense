@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <b>Advanced Autonomous Vehicle Vision System</b><br>
+  <b>Advanced Autonomous Vehicle Perception System</b><br>
   Real-time perception powered by TensorRT on NVIDIA Jetson
 </p>
 
