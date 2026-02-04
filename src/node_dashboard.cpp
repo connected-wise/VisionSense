@@ -316,10 +316,17 @@ int main(int argc, char **argv)
 {
     ROS_CREATE_NODE("dashboard");
 
-    auto cam_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "image_in", 1, camera_callback);
+    // Use BEST_EFFORT QoS for image subscribers to prevent back-pressure
+    rclcpp::QoS qos_best_effort(1);
+    qos_best_effort.best_effort();
+    qos_best_effort.durability_volatile();
+
+    auto cam_sub = node->create_subscription<sensor_msgs::Image>(
+        "image_in", qos_best_effort, camera_callback);
     auto detect_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Detect, "detect_in", 1, detection_callback);
     auto lanes_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Lanes, "lanes_in", 1, lanes_callback);
-    auto gui_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "gui_in", 1, gui_callback);
+    auto gui_sub = node->create_subscription<sensor_msgs::Image>(
+        "gui_in", qos_best_effort, gui_callback);
     auto classify_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Signs, "signs", 1, classify_callback);
 
     ROS_CREATE_PUBLISHER(sensor_msgs::msg::CompressedImage, "camera", 5, camera_dashboard_pub);

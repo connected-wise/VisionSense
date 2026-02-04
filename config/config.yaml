@@ -16,7 +16,7 @@ camera_stereo:
         height:             1200        # Stereo height (output will be 1200x1200 per eye)
         framerate:          30
         rotated_lenses:     false        # true: rotate 90° after split, false: no rotation
-        flip:               "vertical-flip" # Options: rotate-180, vertical-flip, horizontal-flip, or "" for none
+        cuda_flip:          "rotate-180" # CUDA flip (fast): "rotate-180", "vertical-flip", "horizontal-flip", or "" for none
         disparity_range:    128
         sensor_width_mm:    5.76
 
@@ -63,8 +63,8 @@ lanedet:
 
 driver_monitor:
     ros__parameters:
-        face_engine:        "/home/jetson/gaze-estimation/weights/yolov11n_face_fp16.engine"
-        gaze_engine:        "/home/jetson/gaze-estimation/weights/resnet18_gaze_fp16.engine"
+        face_engine:        "/home/jetson/VisionSense/src/graphs/face-detection/yolov11n-facefp16.engine"
+        gaze_engine:        "/home/jetson/VisionSense/src/graphs/gaze-estimation/resnet18_gaze_fp16.engine"
         camera_topic:       "/camera/raw"
         confidence:         0.5
 

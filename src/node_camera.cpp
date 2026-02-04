@@ -5,8 +5,8 @@
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/header.hpp>
 #include <opencv2/opencv.hpp>
-//#include <common.h>
-
+#include <chrono>
+#include <cstring>
 
 // globals
 videoSource* stream = NULL;
@@ -15,9 +15,30 @@ Publisher<std_msgs::msg::Float32> framerate_pub = NULL;
 Publisher<std_msgs::msg::Header> timestamp_pub = NULL;
 imageConverter* image_cvt = NULL;
 
+// Pre-allocated message buffer for zero-allocation publishing
+sensor_msgs::Image img_msg;
+bool msg_initialized = false;
+bool enable_timing = false;
+
+// Timing statistics
+struct TimingStats {
+	double capture_ms = 0;
+	double convert_ms = 0;
+	double publish_ms = 0;
+	int frame_count = 0;
+} timing;
+
+inline double get_time_ms() {
+	return std::chrono::duration<double, std::milli>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 // aquire and publish camera frame
 bool aquireFrame()
 {
+	double t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+	if (enable_timing) t0 = get_time_ms();
+
 	imageConverter::PixelType* nextFrame = NULL;
 
 	// get the latest frame
@@ -27,32 +48,76 @@ bool aquireFrame()
 		return false;
 	}
 
-	// populate the message
-	sensor_msgs::Image msg;
-	std_msgs::msg::Header time;
-	std_msgs::msg::Float32 frate;
+	if (enable_timing) t1 = get_time_ms();
+
+	int width = stream->GetWidth();
+	int height = stream->GetHeight();
+	size_t img_size = width * height * 3;
+
+	// Initialize message buffer on first frame
+	if (!msg_initialized) {
+		img_msg.data.resize(img_size);
+		img_msg.header.frame_id = "camera";
+		img_msg.encoding = "rgb8";
+		img_msg.is_bigendian = false;
+		msg_initialized = true;
+		ROS_INFO("Camera initialized: %dx%d", width, height);
+	}
 
 	// assure correct image size
-	if( !image_cvt->Resize(stream->GetWidth(), stream->GetHeight(), imageConverter::ROSOutputFormat) )
+	if( !image_cvt->Resize(width, height, imageConverter::ROSOutputFormat) )
 	{
 		ROS_ERROR("failed to resize camera image converter");
 		return false;
 	}
 
-	if( !image_cvt->Convert(msg, imageConverter::ROSOutputFormat, nextFrame) )
+	// Convert directly to pre-allocated buffer
+	img_msg.width = width;
+	img_msg.height = height;
+	img_msg.step = width * 3;
+
+	// Use imageConverter but copy to our pre-allocated buffer
+	sensor_msgs::Image temp_msg;
+	if( !image_cvt->Convert(temp_msg, imageConverter::ROSOutputFormat, nextFrame) )
 	{
 		ROS_ERROR("failed to convert video stream frame to sensor_msgs::Image");
 		return false;
 	}
 
+	// Fast copy to pre-allocated buffer
+	std::memcpy(img_msg.data.data(), temp_msg.data.data(), img_size);
+
+	if (enable_timing) t2 = get_time_ms();
+
 	// populate timestamp in header field
-	msg.header.stamp = ROS_TIME_NOW();
-	time.stamp = ROS_TIME_NOW();
-	frate.data = stream->GetFrameRate();
+	auto now = ROS_TIME_NOW();
+	img_msg.header.stamp = now;
+
 	// publish the message
-	image_pub->publish(msg);
+	image_pub->publish(img_msg);
+
+	std_msgs::msg::Header time_msg;
+	std_msgs::msg::Float32 frate;
+	time_msg.stamp = now;
+	frate.data = stream->GetFrameRate();
 	framerate_pub->publish(frate);
-	timestamp_pub->publish(time);
+	timestamp_pub->publish(time_msg);
+
+	if (enable_timing) {
+		t3 = get_time_ms();
+		timing.capture_ms += (t1 - t0);
+		timing.convert_ms += (t2 - t1);
+		timing.publish_ms += (t3 - t2);
+		timing.frame_count++;
+
+		if (timing.frame_count % 30 == 0) {
+			int n = timing.frame_count;
+			ROS_INFO("Timing (avg ms): capture=%.1f convert=%.1f publish=%.1f total=%.1f",
+			         timing.capture_ms / n, timing.convert_ms / n,
+			         timing.publish_ms / n,
+			         (timing.capture_ms + timing.convert_ms + timing.publish_ms) / n);
+		}
+	}
 
 	return true;
 }
@@ -83,7 +148,8 @@ int main(int argc, char **argv)
 	ROS_DECLARE_PARAMETER("loop", video_options.loop);
 	ROS_DECLARE_PARAMETER("flip", flip_str);
 	ROS_DECLARE_PARAMETER("latency", latency);
-	
+	ROS_DECLARE_PARAMETER("enable_timing", enable_timing);
+
 	//retrieve parameters
 	ROS_GET_PARAMETER("resource", resource_str);
 	ROS_GET_PARAMETER("codec", codec_str);
@@ -93,6 +159,7 @@ int main(int argc, char **argv)
 	ROS_GET_PARAMETER("loop", video_options.loop);
 	ROS_GET_PARAMETER("flip", flip_str);
 	ROS_GET_PARAMETER("latency", latency);
+	ROS_GET_PARAMETER("enable_timing", enable_timing);
 	
 	if( resource_str.size() == 0 )
 	{
@@ -123,8 +190,11 @@ int main(int argc, char **argv)
 	}
 
 
-	// advertise publisher topics
-	ROS_CREATE_PUBLISHER(sensor_msgs::Image, "raw", 10, image_pub);
+	// advertise publisher topics with BEST_EFFORT QoS to prevent subscriber back-pressure
+	rclcpp::QoS qos_best_effort(2);
+	qos_best_effort.best_effort();
+	qos_best_effort.durability_volatile();
+	image_pub = node->create_publisher<sensor_msgs::Image>("raw", qos_best_effort);
 	ROS_CREATE_PUBLISHER(std_msgs::msg::Float32, "framerate", 5, framerate_pub);
 	ROS_CREATE_PUBLISHER(std_msgs::msg::Header, "time", 5, timestamp_pub);
 

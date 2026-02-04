@@ -137,12 +137,20 @@ int main(int argc, char **argv)
     image_cvt_right = new imageConverter();
     image_cvt = new imageConverter();
 
-    auto left_cam_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "left/image_in", 1, left_camera_callback);
-    auto right_cam_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "right/image_in", 1, right_camera_callback);
+    // Use BEST_EFFORT QoS for image subscribers to match camera publisher
+    rclcpp::QoS qos_best_effort(1);
+    qos_best_effort.best_effort();
+    qos_best_effort.durability_volatile();
+
+    auto left_cam_sub = node->create_subscription<sensor_msgs::Image>(
+        "left/image_in", qos_best_effort, left_camera_callback);
+    auto right_cam_sub = node->create_subscription<sensor_msgs::Image>(
+        "right/image_in", qos_best_effort, right_camera_callback);
     auto detect_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Detect, "detect_in", 1, detection_callback);
     auto signs_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Signs, "signs_in", 1, signs_callback);
     auto lanes_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Lanes, "lanes_in", 1, lanes_callback);
-    auto disparity_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "disparity_in", 1, disparity_callback);
+    auto disparity_sub = node->create_subscription<sensor_msgs::Image>(
+        "disparity_in", qos_best_effort, disparity_callback);
 
 	// start publishing video frames
     ROS_INFO("Preview Node initialized, waiting for images");

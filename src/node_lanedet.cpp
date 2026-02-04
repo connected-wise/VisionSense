@@ -327,7 +327,12 @@ int main(int argc, char *argv[])
 
     load_engine(engine_path);
 
-    auto img_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "image_in", 1, img_callback);
+    // Use BEST_EFFORT QoS to match camera publisher and prevent back-pressure
+    rclcpp::QoS qos_best_effort(1);
+    qos_best_effort.best_effort();
+    qos_best_effort.durability_volatile();
+    auto img_sub = node->create_subscription<sensor_msgs::Image>(
+        "image_in", qos_best_effort, img_callback);
 
     ROS_CREATE_PUBLISHER(visionconnect::msg::Lanes, "lanes", 2, lanedet_pub);
 

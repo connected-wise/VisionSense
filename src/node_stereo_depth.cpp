@@ -20,7 +20,6 @@
 #include <NvInfer.h>
 #include <cuda_runtime.h>
 #include <fstream>
-#include <chrono>
 
 //==============================================================================
 // TensorRT Logger
@@ -37,60 +36,78 @@ public:
 static TRTLogger g_trt_logger;
 
 //==============================================================================
-// Preprocessor - Matches LightStereo model requirements
+// Preprocessor - Matches LightStereo model requirements (Optimized)
 //==============================================================================
 class StereoPreprocessor {
 public:
-    // ImageNet normalization parameters
     static constexpr float MEAN[3] = {0.485f, 0.456f, 0.406f};
     static constexpr float STD[3] = {0.229f, 0.224f, 0.225f};
 
     StereoPreprocessor(int target_h, int target_w)
         : target_h_(target_h), target_w_(target_w) {
         output_.resize(3 * target_h * target_w);
+        // Pre-allocate intermediate buffers
+        resized_.create(target_h, target_w, CV_8UC3);
+        padded_.create(target_h, target_w, CV_8UC3);
     }
 
-    // Process RGB image -> normalized CHW tensor
-    // Uses RightTopPad: pad top and right with edge replication
+    // Process RGB uint8 image -> normalized CHW tensor
+    // Optimized: works directly with uint8, pre-allocated buffers
     const std::vector<float>& process(const cv::Mat& input_rgb) {
         int in_h = input_rgb.rows;
         int in_w = input_rgb.cols;
 
-        // Step 1: Resize to fit within target while maintaining aspect ratio
+        // Resize to fit within target while maintaining aspect ratio
         float scale = std::min((float)target_h_ / in_h, (float)target_w_ / in_w);
         int new_h = static_cast<int>(in_h * scale);
         int new_w = static_cast<int>(in_w * scale);
 
-        cv::Mat resized;
-        cv::resize(input_rgb, resized, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
+        cv::resize(input_rgb, resized_, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
 
-        // Step 2: RightTopPad to target size (pad top and right with edge replication)
-        int pad_top = target_h_ - new_h;
-        int pad_right = target_w_ - new_w;
+        // RightTopPad to target size
+        pad_top_ = target_h_ - new_h;
+        pad_right_ = target_w_ - new_w;
+        valid_h_ = new_h;
+        valid_w_ = new_w;
 
-        cv::Mat padded;
-        cv::copyMakeBorder(resized, padded, pad_top, 0, 0, pad_right, cv::BORDER_REPLICATE);
+        cv::copyMakeBorder(resized_, padded_, pad_top_, 0, 0, pad_right_, cv::BORDER_REPLICATE);
 
-        // Step 3: Transpose (HWC -> CHW) and Normalize
+        // Optimized HWC->CHW transpose + normalize
+        const int hw = target_h_ * target_w_;
+        float* out_r = output_.data();
+        float* out_g = output_.data() + hw;
+        float* out_b = output_.data() + 2 * hw;
+
+        const float inv_255 = 1.0f / 255.0f;
+        const float inv_std_r = 1.0f / STD[0];
+        const float inv_std_g = 1.0f / STD[1];
+        const float inv_std_b = 1.0f / STD[2];
+
         for (int y = 0; y < target_h_; y++) {
+            const uchar* row = padded_.ptr<uchar>(y);
+            const int row_offset = y * target_w_;
             for (int x = 0; x < target_w_; x++) {
-                const cv::Vec3f& pixel = padded.at<cv::Vec3f>(y, x);
-                for (int c = 0; c < 3; c++) {
-                    int idx = c * target_h_ * target_w_ + y * target_w_ + x;
-                    output_[idx] = ((pixel[c] / 255.0f) - MEAN[c]) / STD[c];
-                }
+                const int px = x * 3;
+                out_r[row_offset + x] = (row[px + 0] * inv_255 - MEAN[0]) * inv_std_r;
+                out_g[row_offset + x] = (row[px + 1] * inv_255 - MEAN[1]) * inv_std_g;
+                out_b[row_offset + x] = (row[px + 2] * inv_255 - MEAN[2]) * inv_std_b;
             }
         }
 
         return output_;
     }
 
-    const std::vector<float>& getOutput() const { return output_; }
+    int getPadTop() const { return pad_top_; }
+    int getPadRight() const { return pad_right_; }
+    int getValidHeight() const { return valid_h_; }
+    int getValidWidth() const { return valid_w_; }
 
 private:
-    int target_h_;
-    int target_w_;
+    int target_h_, target_w_;
+    int pad_top_ = 0, pad_right_ = 0;
+    int valid_h_ = 0, valid_w_ = 0;
     std::vector<float> output_;
+    cv::Mat resized_, padded_;
 };
 
 constexpr float StereoPreprocessor::MEAN[3];
@@ -102,7 +119,6 @@ constexpr float StereoPreprocessor::STD[3];
 class StereoTRTEngine {
 public:
     StereoTRTEngine(const std::string& engine_path) {
-        // Load engine file
         std::ifstream file(engine_path, std::ios::binary);
         if (!file.good()) {
             throw std::runtime_error("Cannot open engine file: " + engine_path);
@@ -116,7 +132,6 @@ public:
         file.read(engine_data.data(), size);
         file.close();
 
-        // Create runtime and engine
         runtime_ = nvinfer1::createInferRuntime(g_trt_logger);
         engine_ = runtime_->deserializeCudaEngine(engine_data.data(), size);
         context_ = engine_->createExecutionContext();
@@ -125,7 +140,6 @@ public:
             throw std::runtime_error("Failed to create TensorRT engine");
         }
 
-        // Get tensor info
         left_dims_ = engine_->getTensorShape("left_img");
         right_dims_ = engine_->getTensorShape("right_img");
         output_dims_ = engine_->getTensorShape("disp_pred");
@@ -138,19 +152,15 @@ public:
         size_t input_bytes = tensorVolume(left_dims_) * sizeof(float);
         size_t output_bytes = tensorVolume(output_dims_) * sizeof(float);
 
-        // Allocate GPU buffers
         cudaMalloc(&d_left_, input_bytes);
         cudaMalloc(&d_right_, input_bytes);
         cudaMalloc(&d_output_, output_bytes);
 
-        // Set tensor addresses
         context_->setTensorAddress("left_img", d_left_);
         context_->setTensorAddress("right_img", d_right_);
         context_->setTensorAddress("disp_pred", d_output_);
 
         cudaStreamCreate(&stream_);
-
-        // Allocate output buffer
         output_.resize(tensorVolume(output_dims_));
 
         std::cout << "Stereo engine loaded: input " << input_w_ << "x" << input_h_
@@ -200,9 +210,7 @@ public:
 private:
     size_t tensorVolume(const nvinfer1::Dims& dims) {
         size_t vol = 1;
-        for (int i = 0; i < dims.nbDims; ++i) {
-            vol *= dims.d[i];
-        }
+        for (int i = 0; i < dims.nbDims; ++i) vol *= dims.d[i];
         return vol;
     }
 
@@ -222,7 +230,7 @@ private:
 };
 
 //==============================================================================
-// ROS2 Stereo Depth Node
+// ROS2 Stereo Depth Node (Optimized)
 //==============================================================================
 class StereoDepthNode : public rclcpp::Node
 {
@@ -231,43 +239,45 @@ public:
     {
         RCLCPP_INFO(this->get_logger(), "Initializing TensorRT Stereo Depth Node...");
 
-        // Declare parameters
         this->declare_parameter("model", "stereo-depth/LightStereo-S-KITTI.engine");
         this->declare_parameter("max_disparity", 192.0);
         this->declare_parameter("warmup_iterations", 5);
 
-        // Get parameters
         std::string model_name = this->get_parameter("model").as_string();
         max_disparity_ = this->get_parameter("max_disparity").as_double();
         int warmup_iters = this->get_parameter("warmup_iterations").as_int();
 
-        // Resolve model path
         std::string graphs_path = ament_index_cpp::get_package_share_directory("visionconnect") + "/graphs/";
         std::string engine_path = graphs_path + model_name;
 
         RCLCPP_INFO(this->get_logger(), "Loading TensorRT engine: %s", engine_path.c_str());
 
-        // Initialize TensorRT engine
         try {
             engine_ = std::make_unique<StereoTRTEngine>(engine_path);
-            RCLCPP_INFO(this->get_logger(), "✓ TensorRT engine loaded successfully");
-            RCLCPP_INFO(this->get_logger(), "  Input size: %dx%d", engine_->inputWidth(), engine_->inputHeight());
-            RCLCPP_INFO(this->get_logger(), "  Output size: %dx%d", engine_->outputWidth(), engine_->outputHeight());
+            RCLCPP_INFO(this->get_logger(), "TensorRT engine loaded: %dx%d",
+                        engine_->inputWidth(), engine_->inputHeight());
         } catch (const std::exception& e) {
             RCLCPP_ERROR(this->get_logger(), "Failed to load TensorRT engine: %s", e.what());
             throw;
         }
 
-        // Initialize preprocessors
         left_preproc_ = std::make_unique<StereoPreprocessor>(engine_->inputHeight(), engine_->inputWidth());
         right_preproc_ = std::make_unique<StereoPreprocessor>(engine_->inputHeight(), engine_->inputWidth());
 
-        // Create publisher
-        disparity_pub_ = this->create_publisher<sensor_msgs::msg::Image>("disparity", 10);
+        // Pre-allocate postprocessing buffers
+        disp_full_.create(engine_->outputHeight(), engine_->outputWidth(), CV_32FC1);
 
-        // Create synchronized subscribers
-        left_sub_.subscribe(this, "left/image_raw");
-        right_sub_.subscribe(this, "right/image_raw");
+        // Publisher with BEST_EFFORT QoS
+        rclcpp::QoS qos_best_effort(2);
+        qos_best_effort.best_effort();
+        qos_best_effort.durability_volatile();
+        disparity_pub_ = this->create_publisher<sensor_msgs::msg::Image>("disparity", qos_best_effort);
+
+        // Synchronized subscribers with BEST_EFFORT QoS
+        rmw_qos_profile_t qos_profile = rmw_qos_profile_sensor_data;
+        qos_profile.depth = 2;
+        left_sub_.subscribe(this, "left/image_raw", qos_profile);
+        right_sub_.subscribe(this, "right/image_raw", qos_profile);
 
         sync_ = std::make_shared<message_filters::TimeSynchronizer<
             sensor_msgs::msg::Image, sensor_msgs::msg::Image>>(
@@ -277,11 +287,8 @@ public:
             std::bind(&StereoDepthNode::stereoCallback, this,
                      std::placeholders::_1, std::placeholders::_2));
 
-        RCLCPP_INFO(this->get_logger(), "TensorRT stereo depth node initialized");
-        RCLCPP_INFO(this->get_logger(), "Subscribed to: left/image_raw, right/image_raw");
-        RCLCPP_INFO(this->get_logger(), "Publishing disparity to: /stereo_depth/disparity");
+        RCLCPP_INFO(this->get_logger(), "Stereo depth node ready");
 
-        // Warmup will happen on first frame
         warmup_done_ = false;
         warmup_iterations_ = warmup_iters;
     }
@@ -290,148 +297,127 @@ private:
     void stereoCallback(const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
                        const sensor_msgs::msg::Image::ConstSharedPtr& right_msg)
     {
-        auto t_start = std::chrono::high_resolution_clock::now();
+        // Zero-copy message to Mat conversion
+        cv::Mat left = msgToMatNoCopy(left_msg);
+        cv::Mat right = msgToMatNoCopy(right_msg);
 
-        // Convert ROS messages to OpenCV Mat
-        cv::Mat left = msgToMat(left_msg);
-        cv::Mat right = msgToMat(right_msg);
-
-        // Convert BGR to RGB and to float32
+        // Handle color conversion - avoid unnecessary copies
         cv::Mat left_rgb, right_rgb;
-        if (left.channels() == 3) {
+        if (left_msg->encoding == "rgb8") {
+            left_rgb = left;
+            right_rgb = right;
+        } else if (left_msg->encoding == "bgr8") {
             cv::cvtColor(left, left_rgb, cv::COLOR_BGR2RGB);
             cv::cvtColor(right, right_rgb, cv::COLOR_BGR2RGB);
-        } else {
+        } else if (left.channels() == 1) {
             cv::cvtColor(left, left_rgb, cv::COLOR_GRAY2RGB);
             cv::cvtColor(right, right_rgb, cv::COLOR_GRAY2RGB);
+        } else {
+            RCLCPP_WARN_ONCE(this->get_logger(), "Unknown encoding '%s', assuming BGR",
+                            left_msg->encoding.c_str());
+            cv::cvtColor(left, left_rgb, cv::COLOR_BGR2RGB);
+            cv::cvtColor(right, right_rgb, cv::COLOR_BGR2RGB);
         }
 
-        // Convert to float32 for preprocessing
-        left_rgb.convertTo(left_rgb, CV_32FC3);
-        right_rgb.convertTo(right_rgb, CV_32FC3);
-
-        // Preprocess images
+        // Preprocess (optimized - works with uint8 directly)
         const auto& left_data = left_preproc_->process(left_rgb);
         const auto& right_data = right_preproc_->process(right_rgb);
 
         // Warmup on first frame
         if (!warmup_done_) {
-            RCLCPP_INFO(this->get_logger(), "Warming up TensorRT engine (%d iterations)...", warmup_iterations_);
+            RCLCPP_INFO(this->get_logger(), "Warming up TensorRT engine...");
             engine_->warmup(left_data, right_data, warmup_iterations_);
             warmup_done_ = true;
-            RCLCPP_INFO(this->get_logger(), "✓ Warmup complete");
+            RCLCPP_INFO(this->get_logger(), "Warmup complete");
         }
 
         // Run inference
         engine_->infer(left_data, right_data);
 
-        // Get output disparity
+        // Get output and padding info
         const auto& disp_output = engine_->getOutput();
         int out_h = engine_->outputHeight();
         int out_w = engine_->outputWidth();
+        int pad_top = left_preproc_->getPadTop();
+        int valid_h = left_preproc_->getValidHeight();
+        int valid_w = left_preproc_->getValidWidth();
 
-        // Convert disparity to 8-bit normalized image
-        cv::Mat disp_8u(out_h, out_w, CV_8UC1);
-        for (int y = 0; y < out_h; y++) {
-            for (int x = 0; x < out_w; x++) {
-                float d = std::max(0.0f, std::min(disp_output[y * out_w + x] / (float)max_disparity_, 1.0f));
-                disp_8u.at<uchar>(y, x) = static_cast<uchar>(d * 255);
-            }
+        // Copy disparity to pre-allocated buffer
+        memcpy(disp_full_.data, disp_output.data(), out_h * out_w * sizeof(float));
+
+        // Extract valid region and resize to original dimensions
+        cv::Rect valid_roi(0, pad_top, valid_w, valid_h);
+        cv::Mat disp_valid = disp_full_(valid_roi);
+        cv::resize(disp_valid, disp_resized_, cv::Size(left.cols, left.rows), 0, 0, cv::INTER_LINEAR);
+
+        // Initialize output message buffer on first frame
+        if (!msg_initialized_) {
+            disp_msg_.header.frame_id = "stereo_depth";
+            disp_msg_.encoding = "mono8";
+            disp_msg_.is_bigendian = false;
+            disp_msg_.height = left.rows;
+            disp_msg_.width = left.cols;
+            disp_msg_.step = left.cols;
+            disp_msg_.data.resize(left.rows * left.cols);
+            disp_8u_.create(left.rows, left.cols, CV_8UC1);
+            msg_initialized_ = true;
         }
 
-        // Publish disparity
-        auto disp_msg = matToMsg(disp_8u, left_msg->header, "mono8");
-        disparity_pub_->publish(disp_msg);
+        // Convert to 8-bit using OpenCV's vectorized operation
+        disp_resized_.convertTo(disp_8u_, CV_8UC1, 255.0 / max_disparity_, 0);
 
-        auto t_end = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-
-        // Log performance periodically
-        frame_count_++;
-        total_time_ms_ += ms;
-        if (frame_count_ % 30 == 0) {
-            double avg_ms = total_time_ms_ / frame_count_;
-            double fps = 1000.0 / avg_ms;
-            RCLCPP_INFO(this->get_logger(), "Frame %d | %.1fms | %.1f FPS", frame_count_, ms, fps);
-        }
+        // Publish using pre-allocated message
+        disp_msg_.header.stamp = left_msg->header.stamp;
+        memcpy(disp_msg_.data.data(), disp_8u_.data, disp_msg_.data.size());
+        disparity_pub_->publish(disp_msg_);
     }
 
-    cv::Mat msgToMat(const sensor_msgs::msg::Image::ConstSharedPtr& msg)
+    cv::Mat msgToMatNoCopy(const sensor_msgs::msg::Image::ConstSharedPtr& msg)
     {
         int cv_type;
         if (msg->encoding == "mono8")
             cv_type = CV_8UC1;
-        else if (msg->encoding == "bgr8")
+        else if (msg->encoding == "bgr8" || msg->encoding == "rgb8")
             cv_type = CV_8UC3;
-        else if (msg->encoding == "rgb8")
-            cv_type = CV_8UC3;
-        else
-        {
-            RCLCPP_WARN(this->get_logger(), "Unknown encoding: %s, assuming bgr8", msg->encoding.c_str());
+        else {
+            RCLCPP_WARN_ONCE(this->get_logger(), "Unknown encoding: %s", msg->encoding.c_str());
             cv_type = CV_8UC3;
         }
-
-        cv::Mat img(msg->height, msg->width, cv_type,
-                    const_cast<uint8_t*>(&msg->data[0]), msg->step);
-        return img.clone();
+        return cv::Mat(msg->height, msg->width, cv_type,
+                       const_cast<uint8_t*>(msg->data.data()), msg->step);
     }
 
-    sensor_msgs::msg::Image matToMsg(const cv::Mat& img,
-                                     const std_msgs::msg::Header& header,
-                                     const std::string& encoding)
-    {
-        sensor_msgs::msg::Image msg;
-        msg.header = header;
-        msg.height = img.rows;
-        msg.width = img.cols;
-        msg.encoding = encoding;
-        msg.is_bigendian = false;
-        msg.step = img.cols * img.elemSize();
-
-        size_t size = msg.step * msg.height;
-        msg.data.resize(size);
-        memcpy(&msg.data[0], img.data, size);
-
-        return msg;
-    }
-
-    // TensorRT engine
     std::unique_ptr<StereoTRTEngine> engine_;
-
-    // Preprocessors
     std::unique_ptr<StereoPreprocessor> left_preproc_;
     std::unique_ptr<StereoPreprocessor> right_preproc_;
 
-    // Subscribers and synchronizer
     message_filters::Subscriber<sensor_msgs::msg::Image> left_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> right_sub_;
     std::shared_ptr<message_filters::TimeSynchronizer<
         sensor_msgs::msg::Image, sensor_msgs::msg::Image>> sync_;
 
-    // Publisher
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr disparity_pub_;
 
-    // Parameters
     double max_disparity_;
     int warmup_iterations_;
     bool warmup_done_;
 
-    // Performance tracking
-    int frame_count_ = 0;
-    double total_time_ms_ = 0.0;
+    // Pre-allocated buffers (zero-allocation hot path)
+    cv::Mat disp_full_;
+    cv::Mat disp_resized_;
+    cv::Mat disp_8u_;
+    sensor_msgs::msg::Image disp_msg_;
+    bool msg_initialized_ = false;
 };
 
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
 
-    try
-    {
+    try {
         auto node = std::make_shared<StereoDepthNode>();
         rclcpp::spin(node);
-    }
-    catch (const std::exception& e)
-    {
+    } catch (const std::exception& e) {
         RCLCPP_ERROR(rclcpp::get_logger("stereo_depth"), "Exception: %s", e.what());
         return 1;
     }

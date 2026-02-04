@@ -134,8 +134,8 @@ Handles Arducam stereo camera with synchronized left/right image capture and CUD
 | `width` | int | 3840 | Full stereo width (1920×2) |
 | `height` | int | 1200 | Stereo height |
 | `framerate` | int | 30 | Capture framerate |
-| `rotated_lenses` | bool | true | Apply 90° rotation to each eye |
-| `flip` | string | `""` | Flip before split: `rotate-180`, `vertical-flip`, `horizontal-flip`, or empty |
+| `rotated_lenses` | bool | false | Apply 90° rotation to each eye |
+| `cuda_flip` | string | `rotate-180` | CUDA flip mode: `rotate-180`, `vertical-flip`, `horizontal-flip`, or empty for none |
 
 **Topics Published:**
 - `/camera_stereo/left/image_raw` (`sensor_msgs/Image`) - Left camera (1200×1200)
@@ -162,12 +162,11 @@ Computes dense depth maps using LightStereo neural network with TensorRT acceler
 - `right/image_raw` (`sensor_msgs/Image`) - Right stereo image
 
 **Topics Published:**
-- `/stereo_depth/disparity` (`sensor_msgs/Image`) - Colorized disparity map
-- `/stereo_depth/depth` (`sensor_msgs/Image`) - Depth image (meters)
+- `/stereo_depth/disparity` (`sensor_msgs/Image`) - Normalized disparity (mono8, 0-255)
 
 **Model Specifications:**
-- Input: 1200×1200 stereo pair
-- Output: Dense disparity map
+- Input: Stereo pair (preprocessed with aspect-preserving resize and RightTopPad)
+- Output: Dense disparity map (resized back to input dimensions)
 - Architecture: LightStereo-S (KITTI trained)
 
 ---

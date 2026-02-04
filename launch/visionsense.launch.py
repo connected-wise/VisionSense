@@ -145,7 +145,7 @@ def generate_launch_description():
 		executable="dashboard",
 		output="screen",
 		remappings=[
-			("/dashboard/image_in", "/camera_stereo/left/image_raw"),
+			("/dashboard/image_in", "/camera_stereo/right/image_raw"),
 			("/dashboard/detect_in", "/detect/detections"),
 			("/dashboard/signs_in", "/detect/signs"),
 			("/dashboard/lanes_in", "/lanedet/lanes"),
@@ -162,7 +162,7 @@ def generate_launch_description():
 		output="screen",
 		additional_env={"DISPLAY": ":0"},
 		remappings=[
-			("/gui/image_in", "/camera_stereo/left/image_raw"),
+			("/gui/image_in", "/camera_stereo/right/image_raw"),
 			("/gui/detect_in", "/detect/detections"),
 			("/gui/signs_in", "/classify/signs"),
 			("/gui/lanes_in", "/lanedet/lanes"),

@@ -17,6 +17,8 @@
 #include <fstream>
 #include <memory>
 #include <cmath>
+#include <chrono>
+#include <cstring>
 
 // Driver states
 enum DriverState { ALERT = 0, DISTRACTED = 1, DROWSY = 2, NO_DRIVER = 3 };
@@ -302,6 +304,25 @@ const int LOOKING_AWAY_THRESHOLD = 60; // ~2 seconds at 30fps
 const float YAW_THRESHOLD = 0.52f;     // ~30 degrees in radians
 const float PITCH_THRESHOLD = 0.52f;   // ~30 degrees
 
+// Pre-allocated output message buffer
+sensor_msgs::Image out_msg;
+bool out_msg_initialized = false;
+bool enable_timing = false;
+
+// Timing statistics
+struct TimingStats {
+    double total_ms = 0;
+    double face_ms = 0;
+    double gaze_ms = 0;
+    double publish_ms = 0;
+    int frame_count = 0;
+} dm_timing;
+
+inline double dm_get_time_ms() {
+    return std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 const char* getStateName(DriverState state) {
     switch (state) {
         case ALERT: return "ALERT";
@@ -321,25 +342,42 @@ void drawGaze(cv::Mat& image, const cv::Point& center, float pitch, float yaw, i
 }
 
 void image_callback(const sensor_msgs::Image::SharedPtr msg) {
-    // Convert ROS image to OpenCV
+    double t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+    if (enable_timing) t0 = dm_get_time_ms();
+
+    // Convert ROS image to OpenCV - avoid clone by using shared memory where possible
     cv::Mat frame;
     if (msg->encoding == "rgb8") {
         frame = cv::Mat(msg->height, msg->width, CV_8UC3,
-                        const_cast<uint8_t*>(msg->data.data()), msg->step).clone();
+                        const_cast<uint8_t*>(msg->data.data()), msg->step);
         cv::cvtColor(frame, frame, cv::COLOR_RGB2BGR);
     } else if (msg->encoding == "bgr8") {
         frame = cv::Mat(msg->height, msg->width, CV_8UC3,
-                        const_cast<uint8_t*>(msg->data.data()), msg->step).clone();
+                        const_cast<uint8_t*>(msg->data.data()), msg->step);
     } else {
         ROS_WARN("Unsupported encoding: %s", msg->encoding.c_str());
         return;
     }
 
+    // Initialize output message buffer
+    size_t img_size = msg->height * msg->width * 3;
+    if (!out_msg_initialized) {
+        out_msg.data.resize(img_size);
+        out_msg.header.frame_id = msg->header.frame_id;
+        out_msg.encoding = "rgb8";
+        out_msg.is_bigendian = false;
+        out_msg_initialized = true;
+    }
+
     DriverState state = ALERT;
     cv::Mat output = frame.clone();
 
+    if (enable_timing) t1 = dm_get_time_ms();
+
     // Detect faces
     auto faces = face_detector->detect(frame);
+
+    if (enable_timing) t2 = dm_get_time_ms();
 
     if (faces.empty()) {
         frames_no_face++;
@@ -408,17 +446,28 @@ void image_callback(const sensor_msgs::Image::SharedPtr msg) {
     alert_msg.data = (state == DISTRACTED || state == DROWSY || state == NO_DRIVER);
     alert_pub->publish(alert_msg);
 
-    // Publish annotated image
+    // Publish annotated image using pre-allocated buffer
     cv::cvtColor(output, output, cv::COLOR_BGR2RGB);
-    sensor_msgs::Image img_msg;
-    img_msg.header.stamp = msg->header.stamp;
-    img_msg.header.frame_id = msg->header.frame_id;
-    img_msg.height = output.rows;
-    img_msg.width = output.cols;
-    img_msg.encoding = "rgb8";
-    img_msg.step = output.cols * 3;
-    img_msg.data.assign(output.data, output.data + img_msg.step * img_msg.height);
-    image_pub->publish(img_msg);
+    out_msg.header.stamp = msg->header.stamp;
+    out_msg.height = output.rows;
+    out_msg.width = output.cols;
+    out_msg.step = output.cols * 3;
+    std::memcpy(out_msg.data.data(), output.data, img_size);
+    image_pub->publish(out_msg);
+
+    if (enable_timing) {
+        t3 = dm_get_time_ms();
+        dm_timing.total_ms += (t3 - t0);
+        dm_timing.face_ms += (t2 - t1);
+        dm_timing.gaze_ms += (t3 - t2);
+        dm_timing.frame_count++;
+
+        if (dm_timing.frame_count % 30 == 0) {
+            int n = dm_timing.frame_count;
+            ROS_INFO("Driver Monitor Timing (avg ms): face=%.1f gaze+draw=%.1f total=%.1f",
+                     dm_timing.face_ms / n, dm_timing.gaze_ms / n, dm_timing.total_ms / n);
+        }
+    }
 }
 
 int main(int argc, char** argv) {
@@ -433,11 +482,13 @@ int main(int argc, char** argv) {
     ROS_DECLARE_PARAMETER("gaze_engine", gaze_engine);
     ROS_DECLARE_PARAMETER("camera_topic", camera_topic);
     ROS_DECLARE_PARAMETER("confidence", conf_thresh);
+    ROS_DECLARE_PARAMETER("enable_timing", enable_timing);
 
     ROS_GET_PARAMETER("face_engine", face_engine);
     ROS_GET_PARAMETER("gaze_engine", gaze_engine);
     ROS_GET_PARAMETER("camera_topic", camera_topic);
     ROS_GET_PARAMETER("confidence", conf_thresh);
+    ROS_GET_PARAMETER("enable_timing", enable_timing);
 
     // Defaults
     if (face_engine.empty())
@@ -454,16 +505,23 @@ int main(int argc, char** argv) {
     ROS_INFO("Loading gaze estimator: %s", gaze_engine.c_str());
     gaze_estimator = std::make_unique<GazeEstimator>(gaze_engine);
 
-    // Publishers
-    ROS_CREATE_PUBLISHER(sensor_msgs::Image, "image", 2, image_pub);
+    // Publishers - use BEST_EFFORT QoS for image to match subscribers
+    rclcpp::QoS qos_pub(2);
+    qos_pub.best_effort();
+    qos_pub.durability_volatile();
+    image_pub = node->create_publisher<sensor_msgs::Image>("image", qos_pub);
     ROS_CREATE_PUBLISHER(std_msgs::msg::String, "state", 10, state_pub);
     ROS_CREATE_PUBLISHER(std_msgs::msg::Bool, "alert", 10, alert_pub);
 
-    // Subscriber
+    // Subscriber - use BEST_EFFORT QoS to prevent back-pressure
     ROS_INFO("Subscribing to: %s", camera_topic.c_str());
-    auto image_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, camera_topic.c_str(), 2, image_callback);
+    rclcpp::QoS qos_best_effort(2);
+    qos_best_effort.best_effort();
+    qos_best_effort.durability_volatile();
+    auto image_sub = node->create_subscription<sensor_msgs::Image>(
+        camera_topic.c_str(), qos_best_effort, image_callback);
 
-    ROS_INFO("Driver monitoring ready");
+    ROS_INFO("Driver monitoring ready (timing: %s)", enable_timing ? "enabled" : "disabled");
 
     ROS_SPIN();
 

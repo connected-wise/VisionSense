@@ -163,7 +163,62 @@ else
     echo "✓ jetson-inference already installed"
 fi
 
-echo -e "\n12. Verifying installations..."
+echo -e "\n12. Installing camera device tree overlay..."
+# Combined overlay for AR0234 stereo camera + IMX219 rear camera
+OVERLAY_SRC="$(dirname "$0")/overlays/tegra234-p3767-camera-p3768-arducam-imx219-combined.dts"
+OVERLAY_DST="/boot/arducam/dts/tegra234-p3767-camera-p3768-arducam-imx219-combined.dtbo"
+
+if [ -f "$OVERLAY_SRC" ]; then
+    echo "Compiling camera overlay..."
+    OVERLAY_TMP="/tmp/tegra234-p3767-camera-p3768-arducam-imx219-combined.dtbo"
+    dtc -I dts -O dtb -o "$OVERLAY_TMP" "$OVERLAY_SRC" 2>/dev/null
+
+    if [ -f "$OVERLAY_TMP" ]; then
+        # Check if Arducam directory exists
+        if [ -d "/boot/arducam/dts" ]; then
+            sudo cp "$OVERLAY_TMP" "$OVERLAY_DST"
+            echo "✓ Camera overlay installed to $OVERLAY_DST"
+
+            # Update extlinux.conf if ArducamIMX219 entry doesn't exist
+            if ! grep -q "ArducamIMX219" /boot/extlinux/extlinux.conf; then
+                echo "Adding boot entry for combined camera overlay..."
+
+                # Determine kernel and FDT paths
+                if [ -f "/boot/arducam/Image" ]; then
+                    KERNEL_PATH="/boot/arducam/Image"
+                    FDT_PATH="/boot/arducam/dts/dtb/tegra234-p3768-0000+p3767-0005-nv-super.dtb"
+                else
+                    KERNEL_PATH="/boot/Image"
+                    FDT_PATH="/boot/dtb/kernel_tegra234-p3768-0000+p3767-0005-nv.dtb"
+                fi
+
+                sudo tee -a /boot/extlinux/extlinux.conf > /dev/null << BOOTENTRY
+
+LABEL ArducamIMX219
+	MENU LABEL Custom Header Config: <AR0234 + IMX219 Combined>
+	LINUX ${KERNEL_PATH}
+	FDT ${FDT_PATH}
+	INITRD /boot/initrd
+	APPEND \${cbootargs} root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4 mminit_loglevel=4 console=ttyTCU0,115200 firmware_class.path=/etc/firmware fbcon=map:0 video=efifb:off console=tty0
+	OVERLAYS /boot/arducam/dts/tegra234-p3767-camera-p3768-arducam-imx219-combined.dtbo
+BOOTENTRY
+                echo "✓ Boot entry added"
+            else
+                echo "✓ Boot entry already exists"
+            fi
+        else
+            echo "Warning: /boot/arducam/dts not found. Arducam drivers may not be installed."
+            echo "Install Arducam drivers first, then re-run this script."
+        fi
+        rm -f "$OVERLAY_TMP"
+    else
+        echo "✗ Failed to compile camera overlay"
+    fi
+else
+    echo "Warning: Camera overlay source not found at $OVERLAY_SRC"
+fi
+
+echo -e "\n13. Verifying installations..."
 echo "Checking CUDA..."
 nvcc --version || echo "✗ CUDA not found"
 

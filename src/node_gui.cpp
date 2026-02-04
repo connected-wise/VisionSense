@@ -30,16 +30,14 @@ int screen_height = 1080;
 
 // Additional data streams for enhanced GUI
 cv::Mat driver_monitor_image;
-cv::Mat stereo_depth_image;
-cv::Mat stereo_depth_image_cached;  // Cached disparity image to use when new data isn't ready
-std::mutex depth_mutex;             // Protect disparity image updates
+cv::Mat stereo_depth_colored;      // Pre-colorized disparity for display (updated in callback)
+std::mutex depth_mutex;
 std::string driver_state = "UNKNOWN";
 double accel_x = 0.0, accel_y = 0.0, accel_z = 0.0;
 double gyro_x = 0.0, gyro_y = 0.0, gyro_z = 0.0;
 double latitude = 0.0, longitude = 0.0, altitude = 0.0;
 int gps_satellites = 0;
 std::string gps_fix_status = "NO FIX";
-int disparity_skip_frames = 0;     // Skip depth processing every N frames to reduce blocking
 
 // Declare publishers
 Publisher<sensor_msgs::Image> gui_pub = NULL;
@@ -62,30 +60,6 @@ std::string quadrant_v23 = "None";
 bool lane_region_1_available = false;  // Left lane region (between lines 0-1)
 bool lane_region_2_available = false;  // Center lane region (between lines 1-2)
 bool lane_region_3_available = false;  // Right lane region (between lines 2-3)
-
-// Helper function to convert depth image to colorized visualization
-cv::Mat depthToColormap(const cv::Mat& depth_float)
-{
-    if (depth_float.empty()) {
-        return cv::Mat(360, 640, CV_8UC3, cv::Scalar(20, 20, 20));
-    }
-
-    cv::Mat depth_normalized;
-    double min_val, max_val;
-    cv::minMaxLoc(depth_float, &min_val, &max_val);
-
-    if (max_val > min_val) {
-        depth_float.convertTo(depth_normalized, CV_8U,
-            255.0 / (max_val - min_val), -min_val * 255.0 / (max_val - min_val));
-    } else {
-        depth_normalized = cv::Mat::zeros(depth_float.size(), CV_8U);
-    }
-
-    cv::Mat depth_color;
-    cv::applyColorMap(depth_normalized, depth_color, cv::COLORMAP_JET);
-
-    return depth_color;
-}
 
 // Helper function to create data summary panel
 cv::Mat createSummaryPanel(int width, int height)
@@ -222,28 +196,16 @@ cv::Mat createCompositeDisplay(const cv::Mat& main_fused, int screen_width, int 
     cv::putText(composite, "DRIVER MONITOR", cv::Point(main_width + 10, 25),
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
 
-    // Stereo depth (middle-right)
+    // Stereo depth (middle-right) - use pre-colorized image from callback
     cv::Mat depth_display;
-    cv::Mat depth_to_display;
-    if (depth_mutex.try_lock()) {
-        depth_to_display = stereo_depth_image_cached.clone();
-        depth_mutex.unlock();
-    } else {
-        depth_to_display = stereo_depth_image;
-    }
-
-    disparity_skip_frames++;
-    if (disparity_skip_frames >= 3) {
-        if (!depth_to_display.empty()) {
-            stereo_depth_image = depth_to_display;
+    {
+        std::lock_guard<std::mutex> lock(depth_mutex);
+        if (!stereo_depth_colored.empty()) {
+            cv::resize(stereo_depth_colored, depth_display, cv::Size(side_width, side_height), 0, 0, cv::INTER_NEAREST);
         }
-        disparity_skip_frames = 0;
     }
 
-    if (!stereo_depth_image.empty()) {
-        cv::Mat depth_color = depthToColormap(stereo_depth_image);
-        cv::resize(depth_color, depth_display, cv::Size(side_width, side_height));
-    } else {
+    if (depth_display.empty()) {
         depth_display = cv::Mat(side_height, side_width, CV_8UC3, cv::Scalar(40, 40, 40));
         cv::putText(depth_display, "Stereo Depth", cv::Point(side_width/2 - 70, side_height/2),
                     cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(150, 150, 150), 1);
@@ -1091,51 +1053,62 @@ void driver_state_callback(const std_msgs::msg::String::SharedPtr msg)
     }
 }
 
-// Stereo depth callback
+// Stereo depth callback - applies colormap immediately for fast display
 void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
     static bool first_call = true;
-    cv::Mat temp_depth;
 
-    // Validate image data before processing
+    // Validate image data
     if (msg->data.empty() || msg->width == 0 || msg->height == 0) {
+        return;
+    }
+
+    cv::Mat colored;
+
+    if (msg->encoding == "mono8") {
+        // Most common case: 8-bit normalized disparity from stereo_depth node
+        // Apply colormap directly - no conversion needed
+        cv::Mat disp_8u(msg->height, msg->width, CV_8UC1,
+                       const_cast<uint8_t*>(msg->data.data()), msg->step);
+        cv::applyColorMap(disp_8u, colored, cv::COLORMAP_JET);
         if (first_call) {
-            ROS_WARN("Depth callback: Empty or invalid image received");
+            ROS_INFO("Depth callback: mono8 %dx%d", msg->width, msg->height);
+            first_call = false;
         }
-        return;
-    }
-
-    // Validate data size matches expected dimensions
-    size_t expected_size = msg->step * msg->height;
-    if (msg->data.size() < expected_size) {
-        ROS_WARN("Depth callback: Data size mismatch - expected %zu, got %zu", expected_size, msg->data.size());
-        return;
-    }
-
-    // Convert depth image to OpenCV Mat (quick conversion, minimal blocking)
-    if (msg->encoding == "32FC1") {
-        temp_depth = cv::Mat(msg->height, msg->width, CV_32FC1,
-                             const_cast<uint8_t*>(msg->data.data()), msg->step).clone();
+    } else if (msg->encoding == "32FC1") {
+        // Float disparity - normalize then colormap
+        cv::Mat depth_float(msg->height, msg->width, CV_32FC1,
+                           const_cast<uint8_t*>(msg->data.data()), msg->step);
+        cv::Mat normalized;
+        double min_val, max_val;
+        cv::minMaxLoc(depth_float, &min_val, &max_val);
+        if (max_val > min_val) {
+            depth_float.convertTo(normalized, CV_8U, 255.0 / (max_val - min_val),
+                                 -min_val * 255.0 / (max_val - min_val));
+        } else {
+            normalized = cv::Mat::zeros(depth_float.size(), CV_8U);
+        }
+        cv::applyColorMap(normalized, colored, cv::COLORMAP_JET);
         if (first_call) {
-            ROS_INFO("Depth callback triggered: %dx%d %s", msg->width, msg->height, msg->encoding.c_str());
+            ROS_INFO("Depth callback: 32FC1 %dx%d", msg->width, msg->height);
             first_call = false;
         }
     } else if (msg->encoding == "16UC1") {
-        // Handle 16-bit unsigned depth
+        // 16-bit depth - normalize then colormap
         cv::Mat depth_16u(msg->height, msg->width, CV_16UC1,
                          const_cast<uint8_t*>(msg->data.data()), msg->step);
-        depth_16u.convertTo(temp_depth, CV_32FC1, 1.0/1000.0);  // Convert to meters
-        if (first_call) {
-            ROS_INFO("Depth callback triggered (16UC1): %dx%d", msg->width, msg->height);
-            first_call = false;
+        cv::Mat normalized;
+        double min_val, max_val;
+        cv::minMaxLoc(depth_16u, &min_val, &max_val);
+        if (max_val > min_val) {
+            depth_16u.convertTo(normalized, CV_8U, 255.0 / (max_val - min_val),
+                               -min_val * 255.0 / (max_val - min_val));
+        } else {
+            normalized = cv::Mat::zeros(depth_16u.size(), CV_8U);
         }
-    } else if (msg->encoding == "mono8") {
-        // Handle 8-bit normalized disparity from stereo_depth node
-        cv::Mat disp_8u(msg->height, msg->width, CV_8UC1,
-                       const_cast<uint8_t*>(msg->data.data()), msg->step);
-        disp_8u.convertTo(temp_depth, CV_32FC1, 1.0);  // Convert to float (disparity values 0-255)
+        cv::applyColorMap(normalized, colored, cv::COLORMAP_JET);
         if (first_call) {
-            ROS_INFO("Depth callback triggered (mono8 disparity): %dx%d", msg->width, msg->height);
+            ROS_INFO("Depth callback: 16UC1 %dx%d", msg->width, msg->height);
             first_call = false;
         }
     } else {
@@ -1146,10 +1119,10 @@ void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
         return;
     }
 
-    // Update cached disparity in thread-safe manner (very fast operation)
+    // Update colored disparity for display (fast swap)
     {
         std::lock_guard<std::mutex> lock(depth_mutex);
-        stereo_depth_image_cached = temp_depth;
+        stereo_depth_colored = colored;
     }
 }
 
@@ -1235,25 +1208,48 @@ int main(int argc, char **argv)
     cv::namedWindow("Perception Fusion", cv::WINDOW_NORMAL);
     cv::setWindowProperty("Perception Fusion", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
 
-    auto cam_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "image_in", 1, camera_callback);
+    // Use BEST_EFFORT QoS for image subscribers to prevent back-pressure
+    rclcpp::QoS qos_best_effort(1);
+    qos_best_effort.best_effort();
+    qos_best_effort.durability_volatile();
+
+    auto cam_sub = node->create_subscription<sensor_msgs::Image>(
+        "image_in", qos_best_effort, camera_callback);
     auto detect_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Detect, "detect_in", 1, detection_callback);
     auto signs_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Signs, "signs_in", 1, signs_callback);
     auto lanes_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Lanes, "lanes_in", 1, lanes_callback);
     auto adas_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::ADAS, "adas_in", 1, adas_callback);
 
     // Subscribe to additional data streams for enhanced GUI
-    auto driver_monitor_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "/driver_monitor/image", 2, driver_monitor_callback);
+    rclcpp::QoS qos_best_effort_2(2);
+    qos_best_effort_2.best_effort();
+    qos_best_effort_2.durability_volatile();
+
+    // Create a separate callback group for depth to allow parallel execution
+    auto depth_cb_group = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions depth_options;
+    depth_options.callback_group = depth_cb_group;
+
+    auto driver_monitor_sub = node->create_subscription<sensor_msgs::Image>(
+        "/driver_monitor/image", qos_best_effort_2, driver_monitor_callback);
     auto driver_state_sub = ROS_CREATE_SUBSCRIBER(std_msgs::msg::String, "/driver_monitor/state", 2, driver_state_callback);
-    auto depth_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::Image, "/stereo_depth/disparity", 2, depth_callback);
+    auto depth_sub = node->create_subscription<sensor_msgs::Image>(
+        "/stereo_depth/disparity", qos_best_effort_2, depth_callback, depth_options);
     auto imu_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::Imu, "/imu_gps/imu/data", 2, imu_callback);
     auto gps_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::NavSatFix, "/imu_gps/gps/fix", 2, gps_callback);
 
-    ROS_CREATE_PUBLISHER(sensor_msgs::Image, "fusion", 2, gui_pub);
+    // Publish fusion image with BEST_EFFORT QoS
+    rclcpp::QoS qos_pub(2);
+    qos_pub.best_effort();
+    qos_pub.durability_volatile();
+    gui_pub = node->create_publisher<sensor_msgs::Image>("fusion", qos_pub);
     ROS_CREATE_PUBLISHER(visionconnect::msg::SceneData, "scene_data", 2, scene_pub);
 
-    // start publishing video frames
+    // Use MultiThreadedExecutor to allow depth callback to run in parallel with fuse_data
     ROS_INFO("Preview Node initialized, waiting for images");
-    ROS_SPIN();
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
     
     return 0;
 }
