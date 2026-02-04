@@ -31,7 +31,9 @@ int screen_height = 1080;
 // Additional data streams for enhanced GUI
 cv::Mat driver_monitor_image;
 cv::Mat stereo_depth_colored;      // Pre-colorized disparity for display (updated in callback)
+cv::Mat last_main_view;            // Last fused main view (for timer-based refresh)
 std::mutex depth_mutex;
+std::mutex main_view_mutex;
 std::string driver_state = "UNKNOWN";
 double accel_x = 0.0, accel_y = 0.0, accel_z = 0.0;
 double gyro_x = 0.0, gyro_y = 0.0, gyro_z = 0.0;
@@ -971,16 +973,20 @@ void fuse_data()
     // Publish scene data
     publishSceneData();
 
-    // Create composite display with adaptive layout using detected screen size
+    // Store main view for timer-based display refresh
+    {
+        std::lock_guard<std::mutex> lock(main_view_mutex);
+        last_main_view = img.clone();
+    }
+
+    // Create composite display for ROS publishing
     cv::Mat composite = createCompositeDisplay(img, screen_width, screen_height);
 
     sensor_msgs::msg::Image msg;
     msg.header.stamp = ROS_TIME_NOW();
     convert_frame_to_message(composite, msg);
     gui_pub->publish(msg);
-
-    cv::imshow("Perception Fusion", composite);
-    cv::waitKey(1);
+    // Note: cv::imshow is handled by display_refresh_callback timer at 30 fps
 }
 
 // input image subscriber callback
@@ -1189,6 +1195,22 @@ void gps_callback(const sensor_msgs::msg::NavSatFix::SharedPtr msg)
     }
 }
 
+// Timer callback for display refresh (decouples disparity display from detection rate)
+void display_refresh_callback()
+{
+    cv::Mat main_view;
+    {
+        std::lock_guard<std::mutex> lock(main_view_mutex);
+        if (last_main_view.empty()) return;
+        main_view = last_main_view;  // Shallow copy, fast
+    }
+
+    // Create composite display with latest main view and depth
+    cv::Mat composite = createCompositeDisplay(main_view, screen_width, screen_height);
+    cv::imshow("Perception Fusion", composite);
+    cv::waitKey(1);
+}
+
 // node main loop
 int main(int argc, char **argv)
 {
@@ -1244,6 +1266,11 @@ int main(int argc, char **argv)
     qos_pub.durability_volatile();
     gui_pub = node->create_publisher<sensor_msgs::Image>("fusion", qos_pub);
     ROS_CREATE_PUBLISHER(visionconnect::msg::SceneData, "scene_data", 2, scene_pub);
+
+    // Timer for display refresh (30 Hz) - decouples disparity display from detection rate
+    auto display_timer = node->create_wall_timer(
+        std::chrono::milliseconds(33),  // ~30 fps
+        display_refresh_callback);
 
     // Use MultiThreadedExecutor to allow depth callback to run in parallel with fuse_data
     ROS_INFO("Preview Node initialized, waiting for images");
