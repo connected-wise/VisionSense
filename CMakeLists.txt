@@ -167,6 +167,7 @@ target_link_libraries(imu_gps
     common
     cudart
     nvinfer
+    gps
 )
 
 target_link_libraries(stereo_depth

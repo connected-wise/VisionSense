@@ -5,7 +5,7 @@
  * Hardware:
  * - LSM6DSL: Accelerometer + Gyroscope (I2C 0x6A)
  * - LIS3MDL: Magnetometer (I2C 0x1C)
- * - GPS: Serial NMEA sentences on /dev/ttyTHS1
+ * - GPS: via gpsd (supports NMEA/UBX protocols transparently)
  *
  * Topics:
  *   /imu/data - sensor_msgs/Imu (accel + gyro)
@@ -26,8 +26,15 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/i2c-dev.h>
-#include <termios.h>
 #include <cstring>
+#include <gps.h>
+
+// Save gpsd constants before undefining macros that clash with ROS2 NavSatStatus
+static constexpr int GPSD_MODE_NOT_SEEN = MODE_NOT_SEEN;
+static constexpr int GPSD_MODE_2D = MODE_2D;
+#undef STATUS_NO_FIX
+#undef STATUS_FIX
+#undef STATUS_DGPS_FIX
 
 // LSM6DSL (Accel/Gyro) I2C addresses and registers
 #define LSM6DSL_ADDR        0x6A
@@ -58,8 +65,8 @@ Publisher<sensor_msgs::msg::NavSatFix> gps_pub = NULL;
 Publisher<geometry_msgs::msg::TwistStamped> vel_pub = NULL;
 
 int i2c_fd = -1;
-int gps_fd = -1;
 bool gps_available = false;
+struct gps_data_t gpsd_session;
 
 // I2C helper functions
 bool i2c_write_byte(uint8_t addr, uint8_t reg, uint8_t value)
@@ -249,148 +256,58 @@ void read_magnetometer(double& mx, double& my, double& mz)
     mz = raw_z * MAG_SCALE;
 }
 
-// Initialize GPS serial port
-bool init_gps(const std::string& port, int baudrate)
+// Initialize gpsd connection
+bool init_gps(const std::string& host, const std::string& port)
 {
-    gps_fd = open(port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (gps_fd < 0) {
-        ROS_WARN("Failed to open GPS port %s: %s", port.c_str(), strerror(errno));
+    if (gps_open(host.c_str(), port.c_str(), &gpsd_session) != 0) {
+        ROS_WARN("Failed to connect to gpsd at %s:%s", host.c_str(), port.c_str());
         return false;
     }
 
-    struct termios tty;
-    memset(&tty, 0, sizeof(tty));
+    gps_stream(&gpsd_session, WATCH_ENABLE | WATCH_JSON, NULL);
 
-    if (tcgetattr(gps_fd, &tty) != 0) {
-        ROS_WARN("Failed to get GPS port attributes");
-        close(gps_fd);
-        gps_fd = -1;
-        return false;
-    }
-
-    // Set baud rate
-    speed_t speed = B9600;
-    if (baudrate == 115200) speed = B115200;
-    else if (baudrate == 57600) speed = B57600;
-    else if (baudrate == 38400) speed = B38400;
-    else if (baudrate == 19200) speed = B19200;
-
-    cfsetospeed(&tty, speed);
-    cfsetispeed(&tty, speed);
-
-    // 8N1 mode
-    tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
-    tty.c_cflag |= (CLOCAL | CREAD);
-    tty.c_cflag &= ~(PARENB | PARODD);
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CRTSCTS;
-
-    tty.c_lflag = 0;
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_oflag = 0;
-
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 1;
-
-    if (tcsetattr(gps_fd, TCSANOW, &tty) != 0) {
-        ROS_WARN("Failed to set GPS port attributes");
-        close(gps_fd);
-        gps_fd = -1;
-        return false;
-    }
-
-    ROS_INFO("GPS initialized on %s at %d baud", port.c_str(), baudrate);
+    ROS_INFO("Connected to gpsd at %s:%s", host.c_str(), port.c_str());
     return true;
 }
 
-// Parse NMEA GPRMC/GNRMC sentence
-bool parse_gps_sentence(const std::string& sentence, double& lat, double& lon, double& speed)
+// GPS state
+double last_lat = 0, last_lon = 0, last_altitude = 0, last_gps_speed = 0;
+int last_fix_mode = GPSD_MODE_NOT_SEEN;
+
+// Read GPS data from gpsd
+void read_gps()
 {
-    // Check if it's a GPRMC or GNRMC sentence
-    if (sentence.find("$GPRMC") != 0 && sentence.find("$GNRMC") != 0) {
-        return false;
-    }
-
-    // Split by comma
-    std::vector<std::string> fields;
-    std::stringstream ss(sentence);
-    std::string field;
-    while (std::getline(ss, field, ',')) {
-        fields.push_back(field);
-    }
-
-    if (fields.size() < 10) {
-        return false;
-    }
-
-    // Check validity (field 2)
-    if (fields[2] != "A") {
-        return false;
-    }
-
-    // Parse latitude (fields 3, 4)
-    if (fields[3].length() < 4 || fields[4].empty()) {
-        return false;
-    }
-
-    double lat_deg = std::stod(fields[3].substr(0, 2));
-    double lat_min = std::stod(fields[3].substr(2));
-    lat = lat_deg + lat_min / 60.0;
-    if (fields[4] == "S") lat = -lat;
-
-    // Parse longitude (fields 5, 6)
-    if (fields[5].length() < 5 || fields[6].empty()) {
-        return false;
-    }
-
-    double lon_deg = std::stod(fields[5].substr(0, 3));
-    double lon_min = std::stod(fields[5].substr(3));
-    lon = lon_deg + lon_min / 60.0;
-    if (fields[6] == "W") lon = -lon;
-
-    // Parse speed in knots (field 7), convert to m/s
-    if (!fields[7].empty()) {
-        speed = std::stod(fields[7]) * 0.514444;
-    } else {
-        speed = 0.0;
-    }
-
-    return true;
-}
-
-// Read GPS data
-bool read_gps(double& lat, double& lon, double& speed)
-{
-    if (gps_fd < 0) return false;
-
-    static std::string buffer;
-    char buf[256];
-    int n = read(gps_fd, buf, sizeof(buf) - 1);
-
-    if (n > 0) {
-        buf[n] = '\0';
-        buffer += buf;
-
-        // Look for complete NMEA sentences
-        size_t end = buffer.find('\n');
-        while (end != std::string::npos) {
-            std::string sentence = buffer.substr(0, end);
-            buffer = buffer.substr(end + 1);
-
-            // Try to parse the sentence
-            if (parse_gps_sentence(sentence, lat, lon, speed)) {
-                return true;
-            }
-
-            end = buffer.find('\n');
+    // Check if data is waiting (0ms timeout = non-blocking)
+    while (gps_waiting(&gpsd_session, 0)) {
+        if (gps_read(&gpsd_session, NULL, 0) == -1) {
+            ROS_WARN("gpsd connection lost, attempting reconnect...");
+            gps_close(&gpsd_session);
+            gps_available = false;
+            return;
         }
-    }
 
-    return false;
+        // Only update fix mode from real fix reports (ignore MODE_NOT_SEEN=0)
+        if ((gpsd_session.set & MODE_SET) && gpsd_session.fix.mode > GPSD_MODE_NOT_SEEN) {
+            last_fix_mode = gpsd_session.fix.mode;
+        }
+
+        if (gpsd_session.set & LATLON_SET) {
+            last_lat = gpsd_session.fix.latitude;
+            last_lon = gpsd_session.fix.longitude;
+        }
+
+        if (gpsd_session.set & ALTITUDE_SET) {
+            last_altitude = gpsd_session.fix.altMSL;
+        }
+
+        if (gpsd_session.set & SPEED_SET) {
+            last_gps_speed = gpsd_session.fix.speed;
+        }
+
+    }
 }
 
 // Global state for publish loop
-double last_lat = 0, last_lon = 0, last_gps_speed = 0;
 bool mag_available = false;
 bool imu_available_global = false;
 
@@ -454,19 +371,25 @@ void publish_sensors()
         mag_pub->publish(mag_msg);
     }
 
-    // Read and publish GPS
-    bool gps_has_fix = gps_available && read_gps(last_lat, last_lon, last_gps_speed);
+    // Read GPS from gpsd
+    if (gps_available) {
+        read_gps();
+    }
 
+    // Publish GPS fix
     sensor_msgs::msg::NavSatFix gps_msg;
     gps_msg.header.stamp = imu_msg.header.stamp;
     gps_msg.header.frame_id = "gps_link";
 
     gps_msg.latitude = last_lat;
     gps_msg.longitude = last_lon;
-    gps_msg.altitude = 0.0;  // Not available in GPRMC
-    gps_msg.status.status = gps_has_fix ?
-        sensor_msgs::msg::NavSatStatus::STATUS_FIX :
-        sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+    gps_msg.altitude = last_altitude;
+
+    if (last_fix_mode >= GPSD_MODE_2D) {
+        gps_msg.status.status = sensor_msgs::msg::NavSatStatus::STATUS_FIX;
+    } else {
+        gps_msg.status.status = sensor_msgs::msg::NavSatStatus::STATUS_NO_FIX;
+    }
     gps_msg.status.service = sensor_msgs::msg::NavSatStatus::SERVICE_GPS;
 
     gps_pub->publish(gps_msg);
@@ -488,16 +411,16 @@ int main(int argc, char** argv)
 
     // Parameters
     int i2c_bus = 7;
-    std::string gps_port = "/dev/ttyTHS1";
-    int gps_baud = 9600;
+    std::string gpsd_host = "localhost";
+    std::string gpsd_port = DEFAULT_GPSD_PORT;
 
     ROS_DECLARE_PARAMETER("i2c_bus", i2c_bus);
-    ROS_DECLARE_PARAMETER("gps_port", gps_port);
-    ROS_DECLARE_PARAMETER("gps_baud", gps_baud);
+    ROS_DECLARE_PARAMETER("gpsd_host", gpsd_host);
+    ROS_DECLARE_PARAMETER("gpsd_port", gpsd_port);
 
     ROS_GET_PARAMETER_OR("i2c_bus", i2c_bus, 7);
-    ROS_GET_PARAMETER_OR("gps_port", gps_port, std::string("/dev/ttyTHS1"));
-    ROS_GET_PARAMETER_OR("gps_baud", gps_baud, 9600);
+    ROS_GET_PARAMETER_OR("gpsd_host", gpsd_host, std::string("localhost"));
+    ROS_GET_PARAMETER_OR("gpsd_port", gpsd_port, std::string(DEFAULT_GPSD_PORT));
 
     // Open I2C bus
     char i2c_device[32];
@@ -519,8 +442,8 @@ int main(int argc, char** argv)
 
     mag_available = init_lis3mdl();  // Magnetometer is optional
 
-    // Initialize GPS
-    gps_available = init_gps(gps_port, gps_baud);
+    // Initialize GPS via gpsd
+    gps_available = init_gps(gpsd_host, gpsd_port);
 
     // Create publishers
     ROS_CREATE_PUBLISHER(sensor_msgs::msg::Imu, "imu/data", 10, imu_pub);
@@ -560,7 +483,10 @@ int main(int argc, char** argv)
 
     // Cleanup
     if (i2c_fd >= 0) close(i2c_fd);
-    if (gps_fd >= 0) close(gps_fd);
+    if (gps_available) {
+        gps_stream(&gpsd_session, WATCH_DISABLE, NULL);
+        gps_close(&gpsd_session);
+    }
 
     ROS_INFO("IMU-GPS node shutting down");
     return 0;

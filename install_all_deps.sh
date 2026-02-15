@@ -80,8 +80,12 @@ sudo apt install -y \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
     libgstreamer-plugins-good1.0-dev \
+    libgstreamer-plugins-bad1.0-dev \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-libav \
+    gpsd \
+    gpsd-clients \
+    libgps-dev \
     v4l-utils
 
 echo -e "\n7. Checking OpenCV installation..."
@@ -129,11 +133,37 @@ export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/tegra:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 EOL
 
-echo -e "\n9. Installing Python packages..."
+echo -e "\n9. Configuring gpsd for GPS module..."
+if [ -f /etc/default/gpsd ]; then
+    # Configure gpsd to use the Jetson UART connected to GPS module
+    if ! grep -q "ttyTHS1" /etc/default/gpsd; then
+        echo "Configuring gpsd for /dev/ttyTHS1..."
+        sudo tee /etc/default/gpsd > /dev/null << 'GPSDCONF'
+# Devices gpsd should collect to at boot time.
+# They need to be read/writeable, either by user gpsd or the group dialout.
+DEVICES="/dev/ttyTHS1"
+
+# Other options you want to pass to gpsd
+GPSD_OPTIONS=""
+
+# Automatically hot add/remove USB GPS devices via gpsdctl
+USBAUTO="true"
+GPSDCONF
+    else
+        echo "✓ gpsd already configured for /dev/ttyTHS1"
+    fi
+    sudo systemctl enable gpsd gpsd.socket
+    sudo systemctl restart gpsd gpsd.socket
+    echo "✓ gpsd service enabled and started"
+else
+    echo "Warning: /etc/default/gpsd not found. gpsd may not be installed correctly."
+fi
+
+echo -e "\n10. Installing Python packages..."
 pip3 install --upgrade pip
 pip3 install numpy pyserial
 
-echo -e "\n10. Fixing npymath library for newer NumPy versions..."
+echo -e "\n11. Fixing npymath library for newer NumPy versions..."
 # NumPy >= 1.24 moved/removed npymath from standard paths, causing jetson-inference build to fail
 NPYMATH_SRC="/usr/lib/python3/dist-packages/numpy/core/lib/libnpymath.a"
 if [ -f "$NPYMATH_SRC" ] && [ ! -f /usr/lib/libnpymath.a ]; then
@@ -146,7 +176,7 @@ else
     echo "Warning: npymath library not found at $NPYMATH_SRC"
 fi
 
-echo -e "\n11. Checking jetson-inference installation..."
+echo -e "\n12. Checking jetson-inference installation..."
 if [ ! -d "/usr/local/include/jetson-utils" ]; then
     echo "jetson-inference not found. Installing..."
     cd ~
@@ -163,7 +193,7 @@ else
     echo "✓ jetson-inference already installed"
 fi
 
-echo -e "\n12. Installing camera device tree overlay..."
+echo -e "\n13. Installing camera device tree overlay..."
 # Combined overlay for AR0234 stereo camera + IMX219 rear camera
 OVERLAY_SRC="$(dirname "$0")/overlays/tegra234-p3767-camera-p3768-arducam-imx219-combined.dts"
 OVERLAY_DST="/boot/arducam/dts/tegra234-p3767-camera-p3768-arducam-imx219-combined.dtbo"
@@ -218,7 +248,7 @@ else
     echo "Warning: Camera overlay source not found at $OVERLAY_SRC"
 fi
 
-echo -e "\n13. Verifying installations..."
+echo -e "\n14. Verifying installations..."
 echo "Checking CUDA..."
 nvcc --version || echo "✗ CUDA not found"
 
