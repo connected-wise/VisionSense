@@ -41,6 +41,9 @@ double latitude = 0.0, longitude = 0.0, altitude = 0.0;
 int gps_satellites = 0;
 std::string gps_fix_status = "NO FIX";
 
+// Depth legend config (must match stereo_depth node's max_depth_m)
+constexpr float DEPTH_LEGEND_MAX_M = 50.0f;
+
 // Declare publishers
 Publisher<sensor_msgs::Image> gui_pub = NULL;
 Publisher<visionconnect::msg::SceneData> scene_pub = NULL;
@@ -201,9 +204,15 @@ cv::Mat createCompositeDisplay(const cv::Mat& main_fused, int screen_width, int 
     // Stereo depth (middle-right) - use pre-colorized image from callback
     cv::Mat depth_display;
     {
-        std::lock_guard<std::mutex> lock(depth_mutex);
-        if (!stereo_depth_colored.empty()) {
-            cv::resize(stereo_depth_colored, depth_display, cv::Size(side_width, side_height), 0, 0, cv::INTER_NEAREST);
+        cv::Mat depth_snap;
+        {
+            std::lock_guard<std::mutex> lock(depth_mutex);
+            if (!stereo_depth_colored.empty()) {
+                depth_snap = stereo_depth_colored;  // Shallow copy, ref-counted
+            }
+        }
+        if (!depth_snap.empty()) {
+            cv::resize(depth_snap, depth_display, cv::Size(side_width, side_height), 0, 0, cv::INTER_NEAREST);
         }
     }
 
@@ -213,6 +222,48 @@ cv::Mat createCompositeDisplay(const cv::Mat& main_fused, int screen_width, int 
                     cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(150, 150, 150), 1);
         cv::putText(depth_display, "No Data", cv::Point(side_width/2 - 40, side_height/2 + 25),
                     cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(100, 100, 100), 1);
+    } else {
+        // Draw distance legend color bar (TURBO gradient with distance labels)
+        int bar_w = 14;
+        int bar_h = depth_display.rows - 50;
+        int bar_y = 35;
+        int pad = 4;
+        int legend_w = pad + bar_w + 8 + 30 + pad;  // pad + bar + tick/gap + label + pad
+        int bar_x = depth_display.cols - legend_w + pad;
+
+        // Semi-transparent dark background behind legend area
+        cv::Rect bg_rect(bar_x - pad, bar_y - pad, legend_w, bar_h + 2 * pad);
+        bg_rect &= cv::Rect(0, 0, depth_display.cols, depth_display.rows);
+        depth_display(bg_rect) *= 0.4;
+
+        // Build 1-pixel wide TURBO gradient: top=255 (far/red), bottom=0 (near/blue)
+        cv::Mat grad(bar_h, 1, CV_8UC1);
+        for (int i = 0; i < bar_h; i++) {
+            grad.at<uchar>(i, 0) = static_cast<uchar>(255 - 255 * i / (bar_h - 1));
+        }
+        cv::Mat grad_color;
+        cv::applyColorMap(grad, grad_color, cv::COLORMAP_TURBO);
+        cv::resize(grad_color, grad_color, cv::Size(bar_w, bar_h), 0, 0, cv::INTER_NEAREST);
+        grad_color.copyTo(depth_display(cv::Rect(bar_x, bar_y, bar_w, bar_h)));
+
+        // Border around color bar
+        cv::rectangle(depth_display, cv::Point(bar_x - 1, bar_y - 1),
+                      cv::Point(bar_x + bar_w, bar_y + bar_h), cv::Scalar(180, 180, 180), 1);
+
+        // Distance tick labels
+        const int num_ticks = 6;  // 0m, 10m, 20m, 30m, 40m, 50m
+        char label[16];
+        for (int i = 0; i < num_ticks; i++) {
+            float depth_val = DEPTH_LEGEND_MAX_M * i / (num_ticks - 1);
+            int y = bar_y + bar_h - 1 - (bar_h - 1) * i / (num_ticks - 1);
+            // Tick mark
+            cv::line(depth_display, cv::Point(bar_x + bar_w, y),
+                     cv::Point(bar_x + bar_w + 3, y), cv::Scalar(180, 180, 180), 1);
+            // Label
+            snprintf(label, sizeof(label), "%dm", (int)depth_val);
+            cv::putText(depth_display, label, cv::Point(bar_x + bar_w + 5, y + 4),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.32, cv::Scalar(255, 255, 255), 1);
+        }
     }
     depth_display.copyTo(composite(cv::Rect(main_width, side_height, side_width, side_height)));
     cv::putText(composite, "STEREO DEPTH", cv::Point(main_width + 10, side_height + 25),
@@ -1071,7 +1122,16 @@ void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 
     cv::Mat colored;
 
-    if (msg->encoding == "mono8") {
+    if (msg->encoding == "bgr8") {
+        // Pre-colorized depth from stereo_depth node — just copy
+        cv::Mat src(msg->height, msg->width, CV_8UC3,
+                   const_cast<uint8_t*>(msg->data.data()), msg->step);
+        colored = src.clone();
+        if (first_call) {
+            ROS_INFO("Depth callback: bgr8 %dx%d", msg->width, msg->height);
+            first_call = false;
+        }
+    } else if (msg->encoding == "mono8") {
         // Most common case: 8-bit normalized disparity from stereo_depth node
         // Apply colormap directly - no conversion needed
         cv::Mat disp_8u(msg->height, msg->width, CV_8UC1,
@@ -1256,7 +1316,7 @@ int main(int argc, char **argv)
         "/driver_monitor/image", qos_best_effort_2, driver_monitor_callback);
     auto driver_state_sub = ROS_CREATE_SUBSCRIBER(std_msgs::msg::String, "/driver_monitor/state", 2, driver_state_callback);
     auto depth_sub = node->create_subscription<sensor_msgs::Image>(
-        "/stereo_depth/disparity", qos_best_effort_2, depth_callback, depth_options);
+        "/stereo_depth/depth_color", qos_best_effort_2, depth_callback, depth_options);
     auto imu_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::Imu, "/imu_gps/imu/data", 2, imu_callback);
     auto gps_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::NavSatFix, "/imu_gps/gps/fix", 2, gps_callback);
 

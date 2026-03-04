@@ -25,7 +25,7 @@ class DisparityDisplay(Node):
 
         self.sub = self.create_subscription(
             Image,
-            '/stereo_depth/disparity',
+            '/stereo_depth/depth_color',
             self.disparity_callback,
             qos
         )
@@ -37,17 +37,19 @@ class DisparityDisplay(Node):
         self.frame_count += 1
 
         # Convert to numpy array
-        if msg.encoding == 'mono8':
+        if msg.encoding == 'bgr8':
+            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
+            colored = img.copy()  # already colorized
+        elif msg.encoding == 'mono8':
             img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width)
+            colored = cv2.applyColorMap(img, cv2.COLORMAP_JET)
         elif msg.encoding == '32FC1':
             img = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
             img = (np.clip(img / 192.0, 0, 1) * 255).astype(np.uint8)
+            colored = cv2.applyColorMap(img, cv2.COLORMAP_JET)
         else:
             self.get_logger().warn(f'Unknown encoding: {msg.encoding}')
             return
-
-        # Apply colormap
-        colored = cv2.applyColorMap(img, cv2.COLORMAP_JET)
 
         # Add frame info
         cv2.putText(colored, f'Frame: {self.frame_count}', (10, 30),

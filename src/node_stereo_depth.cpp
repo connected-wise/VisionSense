@@ -5,7 +5,7 @@
  * 1. Subscribes to left/right raw images from camera_stereo
  * 2. Preprocesses images (resize, pad, normalize) for LightStereo model
  * 3. Runs TensorRT inference for disparity estimation
- * 4. Publishes disparity image to /stereo_depth/disparity
+ * 4. Converts disparity to depth (meters) and publishes depth + colorized depth
  *
  * Uses LightStereo deep learning model for accurate stereo matching
  */
@@ -242,10 +242,20 @@ public:
         this->declare_parameter("model", "stereo-depth/LightStereo-S-KITTI.engine");
         this->declare_parameter("max_disparity", 192.0);
         this->declare_parameter("warmup_iterations", 5);
+        this->declare_parameter("baseline_mm", 100.0);
+        this->declare_parameter("focal_length_mm", 3.6);
+        this->declare_parameter("sensor_width_mm", 5.76);
+        this->declare_parameter("max_depth_m", 50.0);
+        this->declare_parameter("color_publish_size", 480);
 
         std::string model_name = this->get_parameter("model").as_string();
         max_disparity_ = this->get_parameter("max_disparity").as_double();
         int warmup_iters = this->get_parameter("warmup_iterations").as_int();
+        baseline_m_ = this->get_parameter("baseline_mm").as_double() / 1000.0;
+        focal_length_mm_ = this->get_parameter("focal_length_mm").as_double();
+        sensor_width_mm_ = this->get_parameter("sensor_width_mm").as_double();
+        max_depth_m_ = this->get_parameter("max_depth_m").as_double();
+        color_publish_size_ = this->get_parameter("color_publish_size").as_int();
 
         std::string graphs_path = ament_index_cpp::get_package_share_directory("visionconnect") + "/graphs/";
         std::string engine_path = graphs_path + model_name;
@@ -267,13 +277,14 @@ public:
         // Pre-allocate postprocessing buffers
         disp_full_.create(engine_->outputHeight(), engine_->outputWidth(), CV_32FC1);
 
-        // Publisher with BEST_EFFORT QoS
-        rclcpp::QoS qos_best_effort(2);
-        qos_best_effort.best_effort();
-        qos_best_effort.durability_volatile();
-        disparity_pub_ = this->create_publisher<sensor_msgs::msg::Image>("disparity", qos_best_effort);
+        // Publishers with BEST_EFFORT QoS, depth=1 to always serve latest frame
+        rclcpp::QoS qos_pub(1);
+        qos_pub.best_effort();
+        qos_pub.durability_volatile();
+        depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>("depth", qos_pub);
+        depth_color_pub_ = this->create_publisher<sensor_msgs::msg::Image>("depth_color", qos_pub);
 
-        // Synchronized subscribers with BEST_EFFORT QoS
+        // Synchronized subscribers with BEST_EFFORT QoS, depth=2 for reliable sync matching
         rmw_qos_profile_t qos_profile = rmw_qos_profile_sensor_data;
         qos_profile.depth = 2;
         left_sub_.subscribe(this, "left/image_raw", qos_profile);
@@ -350,26 +361,75 @@ private:
         cv::Mat disp_valid = disp_full_(valid_roi);
         cv::resize(disp_valid, disp_resized_, cv::Size(left.cols, left.rows), 0, 0, cv::INTER_LINEAR);
 
-        // Initialize output message buffer on first frame
-        if (!msg_initialized_) {
-            disp_msg_.header.frame_id = "stereo_depth";
-            disp_msg_.encoding = "mono8";
-            disp_msg_.is_bigendian = false;
-            disp_msg_.height = left.rows;
-            disp_msg_.width = left.cols;
-            disp_msg_.step = left.cols;
-            disp_msg_.data.resize(left.rows * left.cols);
-            disp_8u_.create(left.rows, left.cols, CV_8UC1);
-            msg_initialized_ = true;
+        // Initialize depth buffers and messages once (pre-allocated, zero alloc in hot path)
+        if (!depth_initialized_) {
+            focal_length_px_ = (focal_length_mm_ / sensor_width_mm_) * (double)left.cols;
+            bf_ = baseline_m_ * focal_length_px_;
+            RCLCPP_INFO(this->get_logger(), "Depth params: focal_px=%.1f, bf=%.3f, max_depth=%.1fm",
+                        focal_length_px_, bf_, max_depth_m_);
+
+            int rows = left.rows, cols = left.cols;
+
+            depth_norm_.create(rows, cols, CV_8UC1);
+
+            depth_msg_.header.frame_id = "stereo_depth";
+            depth_msg_.encoding = "32FC1";
+            depth_msg_.is_bigendian = false;
+            depth_msg_.height = rows;
+            depth_msg_.width = cols;
+            depth_msg_.step = cols * sizeof(float);
+            depth_msg_.data.resize(rows * cols * sizeof(float));
+
+            int pub_size = color_publish_size_;
+            depth_norm_small_.create(pub_size, pub_size, CV_8UC1);
+            zero_mask_.create(pub_size, pub_size, CV_8UC1);
+
+            depth_color_msg_.header.frame_id = "stereo_depth";
+            depth_color_msg_.encoding = "bgr8";
+            depth_color_msg_.is_bigendian = false;
+            depth_color_msg_.height = pub_size;
+            depth_color_msg_.width = pub_size;
+            depth_color_msg_.step = pub_size * 3;
+            depth_color_msg_.data.resize(pub_size * pub_size * 3);
+
+            depth_initialized_ = true;
         }
 
-        // Convert to 8-bit using OpenCV's vectorized operation
-        disp_resized_.convertTo(disp_8u_, CV_8UC1, 255.0 / max_disparity_, 0);
+        int rows = disp_resized_.rows;
+        int cols = disp_resized_.cols;
 
-        // Publish using pre-allocated message
-        disp_msg_.header.stamp = left_msg->header.stamp;
-        memcpy(disp_msg_.data.data(), disp_8u_.data, disp_msg_.data.size());
-        disparity_pub_->publish(disp_msg_);
+        // Write depth directly into pre-allocated message buffer (no intermediate Mat + memcpy)
+        cv::Mat depth_map(rows, cols, CV_32FC1, depth_msg_.data.data());
+        for (int r = 0; r < rows; r++) {
+            const float* disp_row = disp_resized_.ptr<float>(r);
+            float* depth_row = depth_map.ptr<float>(r);
+            for (int c = 0; c < cols; c++) {
+                depth_row[c] = (disp_row[c] > 1.0f) ? (float)(bf_ / disp_row[c]) : 0.0f;
+            }
+        }
+
+        // Normalize full-res depth to uint8
+        depth_map.convertTo(depth_norm_, CV_8UC1, 255.0 / max_depth_m_);
+
+        // Resize mono8 BEFORE colormap — much cheaper than resizing bgr8
+        int pub_size = color_publish_size_;
+        cv::resize(depth_norm_, depth_norm_small_, cv::Size(pub_size, pub_size), 0, 0, cv::INTER_AREA);
+
+        // Colormap on small image, directly into pre-allocated message buffer
+        cv::Mat depth_color(pub_size, pub_size, CV_8UC3, depth_color_msg_.data.data());
+        cv::applyColorMap(depth_norm_small_, depth_color, cv::COLORMAP_TURBO);
+
+        // Zero-mask using pre-allocated buffer
+        cv::compare(depth_norm_small_, cv::Scalar(0), zero_mask_, cv::CMP_EQ);
+        depth_color.setTo(cv::Scalar(0, 0, 0), zero_mask_);
+
+        // Publish (ROS copies internally, but no per-frame allocation)
+        depth_msg_.header.stamp = left_msg->header.stamp;
+        depth_color_msg_.header.stamp = left_msg->header.stamp;
+        if (depth_pub_->get_subscription_count() > 0) {
+            depth_pub_->publish(depth_msg_);
+        }
+        depth_color_pub_->publish(depth_color_msg_);
     }
 
     cv::Mat msgToMatNoCopy(const sensor_msgs::msg::Image::ConstSharedPtr& msg)
@@ -396,18 +456,27 @@ private:
     std::shared_ptr<message_filters::TimeSynchronizer<
         sensor_msgs::msg::Image, sensor_msgs::msg::Image>> sync_;
 
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr disparity_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_color_pub_;
 
     double max_disparity_;
     int warmup_iterations_;
     bool warmup_done_;
 
+    // Depth conversion parameters
+    double baseline_m_, focal_length_mm_, sensor_width_mm_, max_depth_m_;
+    double focal_length_px_ = 0.0, bf_ = 0.0;
+    bool depth_initialized_ = false;
+
     // Pre-allocated buffers (zero-allocation hot path)
     cv::Mat disp_full_;
     cv::Mat disp_resized_;
-    cv::Mat disp_8u_;
-    sensor_msgs::msg::Image disp_msg_;
-    bool msg_initialized_ = false;
+    cv::Mat depth_norm_;        // CV_8UC1 - normalized for colormap
+    cv::Mat depth_norm_small_;  // CV_8UC1 - resized for colormap
+    cv::Mat zero_mask_;         // CV_8UC1 - pre-allocated mask
+    int color_publish_size_ = 480;
+    sensor_msgs::msg::Image depth_msg_;
+    sensor_msgs::msg::Image depth_color_msg_;
 };
 
 int main(int argc, char** argv)

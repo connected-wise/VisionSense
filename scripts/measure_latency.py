@@ -143,7 +143,7 @@ class LatencyMeasurementNode(Node):
             '/camera_stereo/right/image_raw',
             '/camera/raw',
             '/gui/fusion',
-            '/stereo_depth/disparity',
+            '/stereo_depth/depth_color',
         ]
 
         for topic in image_topics:
@@ -280,7 +280,7 @@ class LatencyMeasurementNode(Node):
                 '/detect/detections',
                 '/lanedet/lanes',
                 '/classify/signs',
-                '/stereo_depth/disparity',
+                '/stereo_depth/depth_color',
                 '/adas/adas_alerts',
                 '/gui/fusion',
             ]

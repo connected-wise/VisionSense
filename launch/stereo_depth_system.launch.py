@@ -4,8 +4,11 @@ Stereo Depth System Launch File
 
 Launches:
 1. camera_stereo - Captures and publishes left/right rectified images
-2. stereo_depth - Subscribes to images and computes depth map
-3. preview - Displays the disparity image output
+2. stereo_depth  - Computes depth from stereo disparity (TensorRT)
+3. display       - Shows colorized depth map (OpenCV window)
+
+Usage:
+    ros2 launch visionconnect stereo_depth_system.launch.py
 """
 
 import os
@@ -27,6 +30,9 @@ def generate_launch_description():
     with open(config_path, "r") as fp:
         config = yaml.safe_load(fp)
 
+    cam_params = config["camera_stereo"]["ros__parameters"]
+    depth_params = config["stereo_depth"]["ros__parameters"]
+
     # Stereo Camera Node
     # Publishes to:
     #   /camera_stereo/left/image_raw
@@ -36,7 +42,7 @@ def generate_launch_description():
         name="camera_stereo",
         executable="camera_stereo",
         output="screen",
-        parameters=[config["camera_stereo"]["ros__parameters"]]
+        parameters=[cam_params]
     )
     ld.add_action(camera_stereo_node)
 
@@ -45,7 +51,8 @@ def generate_launch_description():
     #   /camera_stereo/left/image_raw
     #   /camera_stereo/right/image_raw
     # Publishes to:
-    #   /stereo_depth/disparity
+    #   /stereo_depth/depth         (32FC1, meters)
+    #   /stereo_depth/depth_color   (bgr8, colorized)
     stereo_depth_node = Node(
         package="visionconnect",
         namespace="stereo_depth",
@@ -56,26 +63,23 @@ def generate_launch_description():
             ("left/image_raw", "/camera_stereo/left/image_raw"),
             ("right/image_raw", "/camera_stereo/right/image_raw")
         ],
-        parameters=[config["stereo_depth"]["ros__parameters"]]
+        parameters=[{
+            **depth_params,
+            "baseline_mm":      cam_params.get("baseline_mm", 100.0),
+            "focal_length_mm":  cam_params.get("focal_length_mm", 3.6),
+            "sensor_width_mm":  cam_params.get("sensor_width_mm", 5.76),
+        }]
     )
     ld.add_action(stereo_depth_node)
 
-    # Preview Node for Stereo Cameras and Disparity
-    preview_node = Node(
+    # Depth Display Node (lightweight OpenCV window)
+    display_node = Node(
         package="visionconnect",
-        name="preview_stereo",
-        executable="preview",
+        executable="display_disparity.py",
+        name="depth_display",
         output="screen",
         additional_env={"DISPLAY": ":0"},
-        parameters=[{
-            'output': 'display://0'
-        }],
-        remappings=[
-            ('left/image_in', '/camera_stereo/left/image_raw'),
-            ('right/image_in', '/camera_stereo/right/image_raw'),
-            ('disparity_in', '/stereo_depth/disparity')
-        ]
     )
-    ld.add_action(preview_node)
+    ld.add_action(display_node)
 
     return ld

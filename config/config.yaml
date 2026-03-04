@@ -11,7 +11,7 @@ camera:
 
 camera_stereo:
     ros__parameters:
-        resource:           "/dev/video1"   # Arducam stereo camera
+        resource:           "/dev/video0"   # Arducam stereo camera
         width:              3840        # Full stereo width (1920 left + 1920 right)
         height:             1200        # Stereo height (output will be 1200x1200 per eye)
         framerate:          30
@@ -19,13 +19,16 @@ camera_stereo:
         cuda_flip:          "rotate-180" # CUDA flip (fast): "rotate-180", "vertical-flip", "horizontal-flip", or "" for none
         disparity_range:    128
         sensor_width_mm:    5.76
+        baseline_mm:        100.0       # Distance between stereo lenses (mm)
+        focal_length_mm:    3.6         # AR0234 M12 lens focal length (mm)
 
 stereo_depth:
     ros__parameters:
         model:                  "stereo-depth/LightStereo-S-KITTI.engine"
         max_disparity:          192.0
         warmup_iterations:      5
-        
+        max_depth_m:            50.0    # Max depth clamp for colorized visualization (meters)
+        color_publish_size:     480     # Resolution for colorized depth visualization
 preview:
     ros__parameters:
         output:             "display://0"
