@@ -33,7 +33,7 @@ VisionSense is a comprehensive ROS2-based computer vision system designed for au
 | **Multi-Object Tracking** | Track objects across frames with unique IDs | BYTE Tracker + Kalman Filter |
 | **Lane Detection** | Segment and detect lane lines | Neural Network + TensorRT |
 | **Traffic Sign Recognition** | Classify 50+ traffic sign types | YOLOv8 Classifier + TensorRT |
-| **Stereo Depth Estimation** | Dense depth maps from stereo camera | LightStereo + TensorRT |
+| **Stereo Depth Estimation** | Dense depth maps from stereo camera | Fast-FoundationStereo + TensorRT |
 | **Driver Monitoring** | Face detection and gaze estimation | YOLOv11 + ResNet18 + TensorRT |
 | **Data Fusion GUI** | Real-time visualization of all perception data | OpenCV + X11 |
 | **Web Dashboard** | Remote monitoring interface | HTTP Server |
@@ -149,12 +149,13 @@ Handles Arducam stereo camera with synchronized left/right image capture and CUD
 
 ### 3. Stereo Depth Node (`stereo_depth`)
 
-Computes dense depth maps using LightStereo neural network with TensorRT acceleration.
+Computes dense depth maps using the Fast-FoundationStereo model with a custom TensorRT plugin (Group-wise Correlation cost volume) and CUDA preprocessing.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model` | string | `LightStereo-S-KITTI.engine` | TensorRT engine path |
-| `max_disparity` | float | 192.0 | Maximum disparity value |
+| `engine` | string | `stereo-depth/stereo_plugin.engine` | TensorRT engine path |
+| `plugin` | string | `stereo-depth/libgwc_plugin.so` | GWC plugin shared library (must be loaded before engine deserialisation) |
+| `max_disparity` | float | 192.0 | Maximum disparity (must match the value baked into the engine) |
 | `warmup_iterations` | int | 5 | Model warmup runs |
 
 **Topics Subscribed:**
@@ -165,9 +166,10 @@ Computes dense depth maps using LightStereo neural network with TensorRT acceler
 - `/stereo_depth/disparity` (`sensor_msgs/Image`) - Normalized disparity (mono8, 0-255)
 
 **Model Specifications:**
-- Input: Stereo pair (preprocessed with aspect-preserving resize and RightTopPad)
-- Output: Dense disparity map (resized back to input dimensions)
-- Architecture: LightStereo-S (KITTI trained)
+- Input: 480×480 RGB stereo pair (CUDA HWC `uint8` BGR → CHW `float32` RGB preprocessing in `src/cuda/stereo_preproc.cu`; mean/std normalisation baked into the engine)
+- Output: Dense disparity map `[1, 1, 480, 480]` float32, upsampled by spatial-attention head
+- Architecture: EdgeNeXt feature backbone + GWC volume (custom CUDA plugin) + 3D hourglass + GRU refinement (8 iterations)
+- Engine generation: see `src/graphs/stereo-depth/README.md` for the ONNX → TensorRT build flow on a fresh Jetson
 
 ---
 
@@ -467,7 +469,7 @@ driver_monitor:
 | `detect.engine` | Object Detection | 640×640 | TensorRT FP16 |
 | `classify.engine` | Sign Classification | 224×224 | TensorRT FP16 |
 | `lane_detect.engine` | Lane Detection | 800×288 | TensorRT FP16 |
-| `LightStereo-S-KITTI.engine` | Stereo Depth | 1200×1200 | TensorRT FP16 |
+| `stereo_plugin.engine` (+ `libgwc_plugin.so`) | Stereo Depth | 480×480 | TensorRT FP16 + custom plugin |
 | `yolov11n_face_fp16.engine` | Face Detection | 640×640 | TensorRT FP16 |
 | `resnet18_gaze_fp16.engine` | Gaze Estimation | 448×448 | TensorRT FP16 |
 
@@ -510,6 +512,8 @@ colcon build --packages-select visionconnect
 
 ### TensorRT Issues
 Ensure models are built for your specific Jetson platform (engine files are not portable).
+
+For the stereo depth engine specifically, both `libgwc_plugin.so` and `stereo_plugin.engine` must be rebuilt on the target device — see `src/graphs/stereo-depth/README.md` for the ONNX → engine build flow.
 
 ## License
 
