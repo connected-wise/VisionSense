@@ -1,13 +1,21 @@
 /**
- * TensorRT-Accelerated Stereo Depth Node
+ * Fast-FoundationStereo Stereo Depth Node
  *
- * Combined node that:
- * 1. Subscribes to left/right raw images from camera_stereo
- * 2. Preprocesses images (resize, pad, normalize) for LightStereo model
- * 3. Runs TensorRT inference for disparity estimation
- * 4. Converts disparity to depth (meters) and publishes depth + colorized depth
+ * Runs the Fast-FoundationStereo model (EdgeNeXt feature backbone + GWC volume +
+ * 3D hourglass + GRU refinement) from a single TensorRT engine that includes a
+ * custom IPluginV2DynamicExt for the group-wise correlation volume.
  *
- * Uses LightStereo deep learning model for accurate stereo matching
+ * Pipeline per frame — mirrors Fast-FoundationStereo/cpp_demo/stereo_trt.cu:
+ *   1. Receive rectified left/right 1200x1200 rgb8 images from camera_stereo
+ *   2. Resize each side to the model input size (e.g. 480x480) with INTER_AREA
+ *   3. Async H2D raw uint8 HWC, then launch a CUDA kernel that converts
+ *      HWC u8 -> CHW f32 RGB directly into the engine's 'left'/'right' buffers
+ *      (raw [0, 255] — mean/std normalisation is baked into the engine)
+ *   4. enqueueV3, async D2H disparity [1,1,H,W] float32, one stream sync
+ *   5. Disparity -> depth using fx scaled to the resized image
+ *
+ * The GWC plugin (libgwc_plugin.so) MUST be dlopen'd before the engine is
+ * deserialised — see Fast-FoundationStereo/cpp_demo/README.md §7.1.
  */
 
 #include "rclcpp/rclcpp.hpp"
@@ -19,7 +27,21 @@
 
 #include <NvInfer.h>
 #include <cuda_runtime.h>
+
+#include <chrono>
+#include <dlfcn.h>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+// GPU preprocessing kernel (src/cuda/stereo_preproc.cu)
+extern "C" cudaError_t cudaHwcU8ToChwF32Rgb(
+    const uint8_t* d_in, float* d_out, int H, int W, cudaStream_t stream);
 
 //==============================================================================
 // TensorRT Logger
@@ -36,210 +58,237 @@ public:
 static TRTLogger g_trt_logger;
 
 //==============================================================================
-// Preprocessor - Matches LightStereo model requirements (Optimized)
+// TensorRT engine wrapper — loads a single Fast-FoundationStereo engine with
+// named IO tensors ("left", "right", "disp").
 //==============================================================================
-class StereoPreprocessor {
+class FFStereoEngine {
 public:
-    static constexpr float MEAN[3] = {0.485f, 0.456f, 0.406f};
-    static constexpr float STD[3] = {0.229f, 0.224f, 0.225f};
-
-    StereoPreprocessor(int target_h, int target_w)
-        : target_h_(target_h), target_w_(target_w) {
-        output_.resize(3 * target_h * target_w);
-        // Pre-allocate intermediate buffers
-        resized_.create(target_h, target_w, CV_8UC3);
-        padded_.create(target_h, target_w, CV_8UC3);
-    }
-
-    // Process RGB uint8 image -> normalized CHW tensor
-    // Optimized: works directly with uint8, pre-allocated buffers
-    const std::vector<float>& process(const cv::Mat& input_rgb) {
-        int in_h = input_rgb.rows;
-        int in_w = input_rgb.cols;
-
-        // Resize to fit within target while maintaining aspect ratio
-        float scale = std::min((float)target_h_ / in_h, (float)target_w_ / in_w);
-        int new_h = static_cast<int>(in_h * scale);
-        int new_w = static_cast<int>(in_w * scale);
-
-        cv::resize(input_rgb, resized_, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
-
-        // RightTopPad to target size
-        pad_top_ = target_h_ - new_h;
-        pad_right_ = target_w_ - new_w;
-        valid_h_ = new_h;
-        valid_w_ = new_w;
-
-        cv::copyMakeBorder(resized_, padded_, pad_top_, 0, 0, pad_right_, cv::BORDER_REPLICATE);
-
-        // Optimized HWC->CHW transpose + normalize
-        const int hw = target_h_ * target_w_;
-        float* out_r = output_.data();
-        float* out_g = output_.data() + hw;
-        float* out_b = output_.data() + 2 * hw;
-
-        const float inv_255 = 1.0f / 255.0f;
-        const float inv_std_r = 1.0f / STD[0];
-        const float inv_std_g = 1.0f / STD[1];
-        const float inv_std_b = 1.0f / STD[2];
-
-        for (int y = 0; y < target_h_; y++) {
-            const uchar* row = padded_.ptr<uchar>(y);
-            const int row_offset = y * target_w_;
-            for (int x = 0; x < target_w_; x++) {
-                const int px = x * 3;
-                out_r[row_offset + x] = (row[px + 0] * inv_255 - MEAN[0]) * inv_std_r;
-                out_g[row_offset + x] = (row[px + 1] * inv_255 - MEAN[1]) * inv_std_g;
-                out_b[row_offset + x] = (row[px + 2] * inv_255 - MEAN[2]) * inv_std_b;
+    FFStereoEngine(const std::string& engine_path, const std::string& plugin_path) {
+        // The GWC plugin MUST be loaded before deserializeCudaEngine so TRT can
+        // resolve the custom IPluginV2DynamicExt creator for "GWCVolume".
+        if (!plugin_path.empty()) {
+            void* handle = dlopen(plugin_path.c_str(), RTLD_NOW);
+            if (!handle) {
+                throw std::runtime_error("dlopen plugin failed: " + std::string(dlerror()));
             }
         }
 
-        return output_;
-    }
-
-    int getPadTop() const { return pad_top_; }
-    int getPadRight() const { return pad_right_; }
-    int getValidHeight() const { return valid_h_; }
-    int getValidWidth() const { return valid_w_; }
-
-private:
-    int target_h_, target_w_;
-    int pad_top_ = 0, pad_right_ = 0;
-    int valid_h_ = 0, valid_w_ = 0;
-    std::vector<float> output_;
-    cv::Mat resized_, padded_;
-};
-
-constexpr float StereoPreprocessor::MEAN[3];
-constexpr float StereoPreprocessor::STD[3];
-
-//==============================================================================
-// TensorRT Stereo Engine
-//==============================================================================
-class StereoTRTEngine {
-public:
-    StereoTRTEngine(const std::string& engine_path) {
-        std::ifstream file(engine_path, std::ios::binary);
-        if (!file.good()) {
+        std::ifstream f(engine_path, std::ios::binary | std::ios::ate);
+        if (!f) {
             throw std::runtime_error("Cannot open engine file: " + engine_path);
         }
-
-        file.seekg(0, std::ios::end);
-        size_t size = file.tellg();
-        file.seekg(0, std::ios::beg);
-
-        std::vector<char> engine_data(size);
-        file.read(engine_data.data(), size);
-        file.close();
-
-        runtime_ = nvinfer1::createInferRuntime(g_trt_logger);
-        engine_ = runtime_->deserializeCudaEngine(engine_data.data(), size);
-        context_ = engine_->createExecutionContext();
-
-        if (!engine_ || !context_) {
-            throw std::runtime_error("Failed to create TensorRT engine");
+        std::streamsize size = f.tellg();
+        f.seekg(0, std::ios::beg);
+        std::vector<char> blob(size);
+        if (!f.read(blob.data(), size)) {
+            throw std::runtime_error("Failed reading engine: " + engine_path);
         }
 
-        left_dims_ = engine_->getTensorShape("left_img");
-        right_dims_ = engine_->getTensorShape("right_img");
-        output_dims_ = engine_->getTensorShape("disp_pred");
+        runtime_ = nvinfer1::createInferRuntime(g_trt_logger);
+        engine_  = runtime_->deserializeCudaEngine(blob.data(), blob.size());
+        if (!engine_) {
+            throw std::runtime_error("deserializeCudaEngine returned null — is libgwc_plugin.so loaded?");
+        }
+        context_ = engine_->createExecutionContext();
+        if (!context_) {
+            throw std::runtime_error("Failed to create execution context");
+        }
 
-        input_h_ = left_dims_.d[2];
-        input_w_ = left_dims_.d[3];
-        output_h_ = output_dims_.d[output_dims_.nbDims - 2];
-        output_w_ = output_dims_.d[output_dims_.nbDims - 1];
+        // Allocate device buffers from each IO tensor's static shape.
+        int n = engine_->getNbIOTensors();
+        for (int i = 0; i < n; ++i) {
+            const char* name = engine_->getIOTensorName(i);
+            auto dims  = engine_->getTensorShape(name);
+            auto dtype = engine_->getTensorDataType(name);
+            size_t bytes = dtypeSize(dtype);
+            for (int j = 0; j < dims.nbDims; ++j) bytes *= static_cast<size_t>(dims.d[j]);
 
-        size_t input_bytes = tensorVolume(left_dims_) * sizeof(float);
-        size_t output_bytes = tensorVolume(output_dims_) * sizeof(float);
+            void* ptr = nullptr;
+            cudaMalloc(&ptr, bytes);
+            buffers_[name]     = ptr;
+            bytes_[name]       = bytes;
+            context_->setTensorAddress(name, ptr);
+        }
 
-        cudaMalloc(&d_left_, input_bytes);
-        cudaMalloc(&d_right_, input_bytes);
-        cudaMalloc(&d_output_, output_bytes);
+        auto left_dims = engine_->getTensorShape("left");
+        if (left_dims.nbDims != 4) {
+            throw std::runtime_error("Expected 'left' tensor to be 4D [B,C,H,W]");
+        }
+        input_h_ = left_dims.d[2];
+        input_w_ = left_dims.d[3];
 
-        context_->setTensorAddress("left_img", d_left_);
-        context_->setTensorAddress("right_img", d_right_);
-        context_->setTensorAddress("disp_pred", d_output_);
+        auto disp_dims = engine_->getTensorShape("disp");
+        output_h_ = disp_dims.d[disp_dims.nbDims - 2];
+        output_w_ = disp_dims.d[disp_dims.nbDims - 1];
+        disp_elems_ = static_cast<size_t>(output_h_) * static_cast<size_t>(output_w_);
 
         cudaStreamCreate(&stream_);
-        output_.resize(tensorVolume(output_dims_));
+        host_disp_.resize(disp_elems_);
 
-        std::cout << "Stereo engine loaded: input " << input_w_ << "x" << input_h_
-                  << ", output " << output_w_ << "x" << output_h_ << std::endl;
+        // Staging buffers for raw uint8 HWC RGB uploads.
+        //   h_*_u8_ — pinned (page-locked) host memory, so cudaMemcpyAsync can
+        //             run truly asynchronously without staging through the
+        //             driver's own bounce buffer.
+        //   d_*_u8_ — regular cudaMalloc'd device memory. The preproc kernel
+        //             reads from these; keeping them in GPU memory rather than
+        //             zero-copy-mapped system memory gives cached reads and
+        //             matches the reference stereo_trt.cu implementation.
+        const size_t u8_bytes = static_cast<size_t>(input_h_) * input_w_ * 3;
+        cudaMallocHost(&h_left_u8_,  u8_bytes);
+        cudaMallocHost(&h_right_u8_, u8_bytes);
+        cudaMalloc(&d_left_u8_,  u8_bytes);
+        cudaMalloc(&d_right_u8_, u8_bytes);
+
+        // cudaEvents for per-stage GPU timing (no extra stream syncs).
+        cudaEventCreate(&ev_start_);
+        cudaEventCreate(&ev_after_upload_);
+        cudaEventCreate(&ev_after_infer_);
+        cudaEventCreate(&ev_end_);
+
+        std::cout << "Fast-FoundationStereo engine loaded: input " << input_w_ << "x"
+                  << input_h_ << ", disp " << output_w_ << "x" << output_h_ << std::endl;
     }
 
-    ~StereoTRTEngine() {
+    ~FFStereoEngine() {
+        if (ev_start_)        cudaEventDestroy(ev_start_);
+        if (ev_after_upload_) cudaEventDestroy(ev_after_upload_);
+        if (ev_after_infer_)  cudaEventDestroy(ev_after_infer_);
+        if (ev_end_)          cudaEventDestroy(ev_end_);
         if (stream_) cudaStreamDestroy(stream_);
-        if (d_left_) cudaFree(d_left_);
-        if (d_right_) cudaFree(d_right_);
-        if (d_output_) cudaFree(d_output_);
+        if (d_left_u8_)  cudaFree(d_left_u8_);
+        if (d_right_u8_) cudaFree(d_right_u8_);
+        if (h_left_u8_)  cudaFreeHost(h_left_u8_);
+        if (h_right_u8_) cudaFreeHost(h_right_u8_);
+        for (auto& kv : buffers_) cudaFree(kv.second);
         if (context_) delete context_;
-        if (engine_) delete engine_;
+        if (engine_)  delete engine_;
         if (runtime_) delete runtime_;
     }
 
-    void infer(const std::vector<float>& left, const std::vector<float>& right) {
-        size_t input_bytes = tensorVolume(left_dims_) * sizeof(float);
-
-        cudaMemcpyAsync(d_left_, left.data(), input_bytes, cudaMemcpyHostToDevice, stream_);
-        cudaMemcpyAsync(d_right_, right.data(), input_bytes, cudaMemcpyHostToDevice, stream_);
-
-        context_->enqueueV3(stream_);
-
-        cudaMemcpyAsync(output_.data(), d_output_, output_.size() * sizeof(float),
-                        cudaMemcpyDeviceToHost, stream_);
-        cudaStreamSynchronize(stream_);
+    // Fill the pinned host staging buffers from HWC RGB cv::Mat data.
+    // The actual H2D copies happen inside infer() on the stream.
+    void stage(const uint8_t* left_u8, const uint8_t* right_u8) {
+        const size_t u8_bytes = static_cast<size_t>(input_h_) * input_w_ * 3;
+        std::memcpy(h_left_u8_,  left_u8,  u8_bytes);
+        std::memcpy(h_right_u8_, right_u8, u8_bytes);
     }
 
-    void warmup(const std::vector<float>& left, const std::vector<float>& right, int iterations = 5) {
-        size_t input_bytes = tensorVolume(left_dims_) * sizeof(float);
-        cudaMemcpy(d_left_, left.data(), input_bytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_right_, right.data(), input_bytes, cudaMemcpyHostToDevice);
+    // Run H2D -> preprocess kernel -> engine -> D2H, all on one stream, with
+    // per-stage cudaEvents recorded around each phase. A single stream sync
+    // at the end blocks only once.
+    void infer() {
+        const size_t u8_bytes = static_cast<size_t>(input_h_) * input_w_ * 3;
+        cudaEventRecord(ev_start_, stream_);
 
-        for (int i = 0; i < iterations; i++) {
-            context_->enqueueV3(stream_);
-            cudaStreamSynchronize(stream_);
+        cudaMemcpyAsync(d_left_u8_,  h_left_u8_,  u8_bytes, cudaMemcpyHostToDevice, stream_);
+        cudaMemcpyAsync(d_right_u8_, h_right_u8_, u8_bytes, cudaMemcpyHostToDevice, stream_);
+
+        // Preprocessing kernel reads cached device memory and writes CHW
+        // float32 directly into the engine's input buffers.
+        cudaHwcU8ToChwF32Rgb(d_left_u8_,
+                             reinterpret_cast<float*>(buffers_["left"]),
+                             input_h_, input_w_, stream_);
+        cudaHwcU8ToChwF32Rgb(d_right_u8_,
+                             reinterpret_cast<float*>(buffers_["right"]),
+                             input_h_, input_w_, stream_);
+        cudaEventRecord(ev_after_upload_, stream_);
+
+        context_->enqueueV3(stream_);
+        cudaEventRecord(ev_after_infer_, stream_);
+
+        cudaMemcpyAsync(host_disp_.data(), buffers_["disp"],
+                        disp_elems_ * sizeof(float),
+                        cudaMemcpyDeviceToHost, stream_);
+        cudaEventRecord(ev_end_, stream_);
+
+        cudaStreamSynchronize(stream_);
+
+        // Resolve timings (these calls are free once the events have fired).
+        cudaEventElapsedTime(&last_upload_ms_, ev_start_,        ev_after_upload_);
+        cudaEventElapsedTime(&last_infer_ms_,  ev_after_upload_, ev_after_infer_);
+        cudaEventElapsedTime(&last_d2h_ms_,    ev_after_infer_,  ev_end_);
+    }
+
+    // Convenience entry point used by the node callback: stage + infer.
+    void stage_and_infer(const uint8_t* left_u8, const uint8_t* right_u8) {
+        stage(left_u8, right_u8);
+        infer();
+    }
+
+    // Run a few iterations with zero-filled inputs to eat the first-inference
+    // setup cost. Called once at node startup, outside the ROS hot path.
+    void warmup(int iterations) {
+        const size_t u8_bytes = static_cast<size_t>(input_h_) * input_w_ * 3;
+        std::memset(h_left_u8_,  0, u8_bytes);
+        std::memset(h_right_u8_, 0, u8_bytes);
+        for (int i = 0; i < iterations; ++i) {
+            infer();
         }
     }
 
-    const std::vector<float>& getOutput() const { return output_; }
-    int inputHeight() const { return input_h_; }
-    int inputWidth() const { return input_w_; }
+    float lastUploadMs() const { return last_upload_ms_; }
+    float lastInferMs()  const { return last_infer_ms_;  }
+    float lastD2hMs()    const { return last_d2h_ms_;    }
+
+    const std::vector<float>& disparity() const { return host_disp_; }
+    int inputHeight()  const { return input_h_; }
+    int inputWidth()   const { return input_w_; }
     int outputHeight() const { return output_h_; }
-    int outputWidth() const { return output_w_; }
+    int outputWidth()  const { return output_w_; }
 
 private:
-    size_t tensorVolume(const nvinfer1::Dims& dims) {
-        size_t vol = 1;
-        for (int i = 0; i < dims.nbDims; ++i) vol *= dims.d[i];
-        return vol;
+    static size_t dtypeSize(nvinfer1::DataType t) {
+        switch (t) {
+            case nvinfer1::DataType::kFLOAT: return 4;
+            case nvinfer1::DataType::kHALF:  return 2;
+            case nvinfer1::DataType::kINT32: return 4;
+            case nvinfer1::DataType::kINT8:  return 1;
+            case nvinfer1::DataType::kBOOL:  return 1;
+            default: return 4;
+        }
     }
 
-    nvinfer1::IRuntime* runtime_ = nullptr;
-    nvinfer1::ICudaEngine* engine_ = nullptr;
+    nvinfer1::IRuntime*          runtime_ = nullptr;
+    nvinfer1::ICudaEngine*       engine_  = nullptr;
     nvinfer1::IExecutionContext* context_ = nullptr;
-    cudaStream_t stream_ = nullptr;
+    cudaStream_t                 stream_  = nullptr;
 
-    nvinfer1::Dims left_dims_, right_dims_, output_dims_;
-    int input_h_, input_w_, output_h_, output_w_;
+    std::map<std::string, void*>  buffers_;
+    std::map<std::string, size_t> bytes_;
 
-    void* d_left_ = nullptr;
-    void* d_right_ = nullptr;
-    void* d_output_ = nullptr;
+    // Pinned host + device u8 staging buffers (one pair per eye).
+    uint8_t* h_left_u8_  = nullptr;
+    uint8_t* h_right_u8_ = nullptr;
+    uint8_t* d_left_u8_  = nullptr;
+    uint8_t* d_right_u8_ = nullptr;
 
-    std::vector<float> output_;
+    // Per-stage GPU timing (filled in by infer()).
+    cudaEvent_t ev_start_        = nullptr;
+    cudaEvent_t ev_after_upload_ = nullptr;
+    cudaEvent_t ev_after_infer_  = nullptr;
+    cudaEvent_t ev_end_          = nullptr;
+    float last_upload_ms_ = 0.f;
+    float last_infer_ms_  = 0.f;
+    float last_d2h_ms_    = 0.f;
+
+    int input_h_ = 0, input_w_ = 0;
+    int output_h_ = 0, output_w_ = 0;
+    size_t disp_elems_ = 0;
+    std::vector<float> host_disp_;
 };
 
 //==============================================================================
-// ROS2 Stereo Depth Node (Optimized)
+// ROS2 Stereo Depth Node
 //==============================================================================
 class StereoDepthNode : public rclcpp::Node
 {
 public:
     StereoDepthNode() : Node("stereo_depth")
     {
-        RCLCPP_INFO(this->get_logger(), "Initializing TensorRT Stereo Depth Node...");
+        RCLCPP_INFO(this->get_logger(), "Initializing Fast-FoundationStereo depth node...");
 
-        this->declare_parameter("model", "stereo-depth/LightStereo-S-KITTI.engine");
+        this->declare_parameter("engine",  "stereo-depth/stereo_plugin.engine");
+        this->declare_parameter("plugin",  "stereo-depth/libgwc_plugin.so");
         this->declare_parameter("max_disparity", 192.0);
         this->declare_parameter("warmup_iterations", 5);
         this->declare_parameter("baseline_mm", 100.0);
@@ -247,44 +296,73 @@ public:
         this->declare_parameter("sensor_width_mm", 5.76);
         this->declare_parameter("max_depth_m", 50.0);
         this->declare_parameter("color_publish_size", 480);
+        // Resolution at which /stereo_depth/depth is published.
+        //   0  = native left-image resolution (backwards compatible; GUI and
+        //        other subscribers expect this).
+        //   N  = publish at an N×N float map (e.g. 480 to match the model's
+        //        native output and skip the ~10-15 ms upsize + ~5.76 MB
+        //        serialise on the hot path).
+        // Kept at 0 by default — opt in explicitly per topology.
+        this->declare_parameter("depth_publish_size", 0);
 
-        std::string model_name = this->get_parameter("model").as_string();
-        max_disparity_ = this->get_parameter("max_disparity").as_double();
-        int warmup_iters = this->get_parameter("warmup_iterations").as_int();
-        baseline_m_ = this->get_parameter("baseline_mm").as_double() / 1000.0;
-        focal_length_mm_ = this->get_parameter("focal_length_mm").as_double();
-        sensor_width_mm_ = this->get_parameter("sensor_width_mm").as_double();
-        max_depth_m_ = this->get_parameter("max_depth_m").as_double();
+        const std::string engine_rel = this->get_parameter("engine").as_string();
+        const std::string plugin_rel = this->get_parameter("plugin").as_string();
+        max_disparity_     = this->get_parameter("max_disparity").as_double();
+        warmup_iterations_ = this->get_parameter("warmup_iterations").as_int();
+        baseline_m_        = this->get_parameter("baseline_mm").as_double() / 1000.0;
+        focal_length_mm_   = this->get_parameter("focal_length_mm").as_double();
+        sensor_width_mm_   = this->get_parameter("sensor_width_mm").as_double();
+        max_depth_m_       = this->get_parameter("max_depth_m").as_double();
         color_publish_size_ = this->get_parameter("color_publish_size").as_int();
+        depth_publish_size_ = this->get_parameter("depth_publish_size").as_int();
 
-        std::string graphs_path = ament_index_cpp::get_package_share_directory("visionconnect") + "/graphs/";
-        std::string engine_path = graphs_path + model_name;
+        const std::string graphs_path =
+            ament_index_cpp::get_package_share_directory("visionconnect") + "/graphs/";
+        const std::string engine_path = graphs_path + engine_rel;
+        const std::string plugin_path = graphs_path + plugin_rel;
 
-        RCLCPP_INFO(this->get_logger(), "Loading TensorRT engine: %s", engine_path.c_str());
+        RCLCPP_INFO(this->get_logger(), "Loading plugin: %s", plugin_path.c_str());
+        RCLCPP_INFO(this->get_logger(), "Loading engine: %s", engine_path.c_str());
 
         try {
-            engine_ = std::make_unique<StereoTRTEngine>(engine_path);
-            RCLCPP_INFO(this->get_logger(), "TensorRT engine loaded: %dx%d",
-                        engine_->inputWidth(), engine_->inputHeight());
+            engine_ = std::make_unique<FFStereoEngine>(engine_path, plugin_path);
         } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "Failed to load TensorRT engine: %s", e.what());
+            RCLCPP_ERROR(this->get_logger(), "Failed to load Fast-FoundationStereo engine: %s", e.what());
             throw;
         }
 
-        left_preproc_ = std::make_unique<StereoPreprocessor>(engine_->inputHeight(), engine_->inputWidth());
-        right_preproc_ = std::make_unique<StereoPreprocessor>(engine_->inputHeight(), engine_->inputWidth());
+        model_h_ = engine_->inputHeight();
+        model_w_ = engine_->inputWidth();
+        disp_h_  = engine_->outputHeight();
+        disp_w_  = engine_->outputWidth();
 
-        // Pre-allocate postprocessing buffers
-        disp_full_.create(engine_->outputHeight(), engine_->outputWidth(), CV_32FC1);
+        // Pre-allocate preprocessing buffers (model-resolution uint8 RGB HWC).
+        // These are fed raw into the engine's GPU preprocessing kernel.
+        left_resized_.create(model_h_, model_w_, CV_8UC3);
+        right_resized_.create(model_h_, model_w_, CV_8UC3);
 
-        // Publishers with BEST_EFFORT QoS, depth=1 to always serve latest frame
+        // Pre-allocate disparity -> depth working buffer at model resolution.
+        depth_model_.create(disp_h_, disp_w_, CV_32FC1);
+
+        // Run warmup NOW, before spinning — this bakes out the first-inference
+        // setup cost (cuDNN/cuBLAS/TRT plan finalisation, kernel JIT, etc.) so
+        // the first ROS callback sees steady-state timings instead of a 1+ sec
+        // stall that backs up the subscriber queue.
+        RCLCPP_INFO(this->get_logger(), "Warming up TensorRT engine (%d iterations)...",
+                    warmup_iterations_);
+        engine_->warmup(warmup_iterations_);
+        RCLCPP_INFO(this->get_logger(),
+                    "Warmup complete — last infer %.1f ms",
+                    engine_->lastInferMs());
+
+        // Publishers
         rclcpp::QoS qos_pub(1);
         qos_pub.best_effort();
         qos_pub.durability_volatile();
-        depth_pub_ = this->create_publisher<sensor_msgs::msg::Image>("depth", qos_pub);
+        depth_pub_       = this->create_publisher<sensor_msgs::msg::Image>("depth", qos_pub);
         depth_color_pub_ = this->create_publisher<sensor_msgs::msg::Image>("depth_color", qos_pub);
 
-        // Synchronized subscribers with BEST_EFFORT QoS, depth=2 for reliable sync matching
+        // Synchronized subscribers
         rmw_qos_profile_t qos_profile = rmw_qos_profile_sensor_data;
         qos_profile.depth = 2;
         left_sub_.subscribe(this, "left/image_raw", qos_profile);
@@ -293,143 +371,162 @@ public:
         sync_ = std::make_shared<message_filters::TimeSynchronizer<
             sensor_msgs::msg::Image, sensor_msgs::msg::Image>>(
             left_sub_, right_sub_, 2);
-
         sync_->registerCallback(
             std::bind(&StereoDepthNode::stereoCallback, this,
                      std::placeholders::_1, std::placeholders::_2));
 
-        RCLCPP_INFO(this->get_logger(), "Stereo depth node ready");
-
-        warmup_done_ = false;
-        warmup_iterations_ = warmup_iters;
+        RCLCPP_INFO(this->get_logger(), "Fast-FoundationStereo depth node ready");
     }
 
 private:
     void stereoCallback(const sensor_msgs::msg::Image::ConstSharedPtr& left_msg,
-                       const sensor_msgs::msg::Image::ConstSharedPtr& right_msg)
+                        const sensor_msgs::msg::Image::ConstSharedPtr& right_msg)
     {
-        // Zero-copy message to Mat conversion
-        cv::Mat left = msgToMatNoCopy(left_msg);
+        const auto t0 = std::chrono::steady_clock::now();
+
+        // Wrap incoming messages zero-copy, then produce RGB uint8 views.
+        cv::Mat left  = msgToMatNoCopy(left_msg);
         cv::Mat right = msgToMatNoCopy(right_msg);
 
-        // Handle color conversion - avoid unnecessary copies
         cv::Mat left_rgb, right_rgb;
         if (left_msg->encoding == "rgb8") {
-            left_rgb = left;
+            left_rgb  = left;
             right_rgb = right;
         } else if (left_msg->encoding == "bgr8") {
-            cv::cvtColor(left, left_rgb, cv::COLOR_BGR2RGB);
+            cv::cvtColor(left,  left_rgb,  cv::COLOR_BGR2RGB);
             cv::cvtColor(right, right_rgb, cv::COLOR_BGR2RGB);
         } else if (left.channels() == 1) {
-            cv::cvtColor(left, left_rgb, cv::COLOR_GRAY2RGB);
+            cv::cvtColor(left,  left_rgb,  cv::COLOR_GRAY2RGB);
             cv::cvtColor(right, right_rgb, cv::COLOR_GRAY2RGB);
         } else {
-            RCLCPP_WARN_ONCE(this->get_logger(), "Unknown encoding '%s', assuming BGR",
-                            left_msg->encoding.c_str());
-            cv::cvtColor(left, left_rgb, cv::COLOR_BGR2RGB);
+            RCLCPP_WARN_ONCE(this->get_logger(),
+                             "Unknown encoding '%s', assuming BGR",
+                             left_msg->encoding.c_str());
+            cv::cvtColor(left,  left_rgb,  cv::COLOR_BGR2RGB);
             cv::cvtColor(right, right_rgb, cv::COLOR_BGR2RGB);
         }
 
-        // Preprocess (optimized - works with uint8 directly)
-        const auto& left_data = left_preproc_->process(left_rgb);
-        const auto& right_data = right_preproc_->process(right_rgb);
+        // Resize to model input. INTER_AREA matches the cpp_demo reference.
+        cv::resize(left_rgb,  left_resized_,  cv::Size(model_w_, model_h_), 0, 0, cv::INTER_AREA);
+        cv::resize(right_rgb, right_resized_, cv::Size(model_w_, model_h_), 0, 0, cv::INTER_AREA);
 
-        // Warmup on first frame
-        if (!warmup_done_) {
-            RCLCPP_INFO(this->get_logger(), "Warming up TensorRT engine...");
-            engine_->warmup(left_data, right_data, warmup_iterations_);
-            warmup_done_ = true;
-            RCLCPP_INFO(this->get_logger(), "Warmup complete");
-        }
+        const auto t_preproc = std::chrono::steady_clock::now();
 
-        // Run inference
-        engine_->infer(left_data, right_data);
+        // stage writes into cudaHostAllocMapped buffers (zero-copy on Jetson),
+        // then infer runs preproc kernel -> engine -> D2H -> single sync,
+        // populating cudaEvent timings we can read back below.
+        engine_->stage_and_infer(left_resized_.data, right_resized_.data);
 
-        // Get output and padding info
-        const auto& disp_output = engine_->getOutput();
-        int out_h = engine_->outputHeight();
-        int out_w = engine_->outputWidth();
-        int pad_top = left_preproc_->getPadTop();
-        int valid_h = left_preproc_->getValidHeight();
-        int valid_w = left_preproc_->getValidWidth();
+        const auto t_infer = std::chrono::steady_clock::now();
 
-        // Copy disparity to pre-allocated buffer
-        memcpy(disp_full_.data, disp_output.data(), out_h * out_w * sizeof(float));
+        // Wrap disparity in a Mat (no copy — points at the host buffer).
+        const auto& disp_out = engine_->disparity();
+        cv::Mat disp_model(disp_h_, disp_w_,
+                           CV_32FC1, const_cast<float*>(disp_out.data()));
 
-        // Extract valid region and resize to original dimensions
-        cv::Rect valid_roi(0, pad_top, valid_w, valid_h);
-        cv::Mat disp_valid = disp_full_(valid_roi);
-        cv::resize(disp_valid, disp_resized_, cv::Size(left.cols, left.rows), 0, 0, cv::INTER_LINEAR);
-
-        // Initialize depth buffers and messages once (pre-allocated, zero alloc in hot path)
+        // One-time initialization of depth conversion constants + output messages.
         if (!depth_initialized_) {
-            focal_length_px_ = (focal_length_mm_ / sensor_width_mm_) * (double)left.cols;
-            bf_ = baseline_m_ * focal_length_px_;
-            RCLCPP_INFO(this->get_logger(), "Depth params: focal_px=%.1f, bf=%.3f, max_depth=%.1fm",
-                        focal_length_px_, bf_, max_depth_m_);
+            // fx is computed at the MODEL input resolution: depth is computed in
+            // that space and then resized up to the source resolution. This is
+            // the numerically correct approach per Fast-FoundationStereo README §7.5.
+            focal_length_px_model_ = (focal_length_mm_ / sensor_width_mm_) * (double)model_w_;
+            bf_model_ = baseline_m_ * focal_length_px_model_;
+            RCLCPP_INFO(this->get_logger(),
+                        "Depth params: fx(model)=%.2f px, baseline=%.3f m, bf=%.4f, max_depth=%.1f m",
+                        focal_length_px_model_, baseline_m_, bf_model_, max_depth_m_);
 
-            int rows = left.rows, cols = left.cols;
-
-            depth_norm_.create(rows, cols, CV_8UC1);
+            // depth_publish_size=0 means "native source resolution", otherwise
+            // publish at an exact square size (default 480, matching the model).
+            const int depth_rows = (depth_publish_size_ > 0) ? depth_publish_size_ : left.rows;
+            const int depth_cols = (depth_publish_size_ > 0) ? depth_publish_size_ : left.cols;
 
             depth_msg_.header.frame_id = "stereo_depth";
-            depth_msg_.encoding = "32FC1";
-            depth_msg_.is_bigendian = false;
-            depth_msg_.height = rows;
-            depth_msg_.width = cols;
-            depth_msg_.step = cols * sizeof(float);
-            depth_msg_.data.resize(rows * cols * sizeof(float));
+            depth_msg_.encoding        = "32FC1";
+            depth_msg_.is_bigendian    = false;
+            depth_msg_.height          = depth_rows;
+            depth_msg_.width           = depth_cols;
+            depth_msg_.step            = depth_cols * sizeof(float);
+            depth_msg_.data.resize(depth_rows * depth_cols * sizeof(float));
 
-            int pub_size = color_publish_size_;
-            depth_norm_small_.create(pub_size, pub_size, CV_8UC1);
+            const int pub_size = color_publish_size_;
+            disp_small_.create(pub_size, pub_size, CV_32FC1);
+            disp_norm_small_.create(pub_size, pub_size, CV_8UC1);
             zero_mask_.create(pub_size, pub_size, CV_8UC1);
 
             depth_color_msg_.header.frame_id = "stereo_depth";
-            depth_color_msg_.encoding = "bgr8";
-            depth_color_msg_.is_bigendian = false;
-            depth_color_msg_.height = pub_size;
-            depth_color_msg_.width = pub_size;
-            depth_color_msg_.step = pub_size * 3;
+            depth_color_msg_.encoding        = "bgr8";
+            depth_color_msg_.is_bigendian    = false;
+            depth_color_msg_.height          = pub_size;
+            depth_color_msg_.width           = pub_size;
+            depth_color_msg_.step            = pub_size * 3;
             depth_color_msg_.data.resize(pub_size * pub_size * 3);
 
             depth_initialized_ = true;
         }
 
-        int rows = disp_resized_.rows;
-        int cols = disp_resized_.cols;
-
-        // Write depth directly into pre-allocated message buffer (no intermediate Mat + memcpy)
-        cv::Mat depth_map(rows, cols, CV_32FC1, depth_msg_.data.data());
-        for (int r = 0; r < rows; r++) {
-            const float* disp_row = disp_resized_.ptr<float>(r);
-            float* depth_row = depth_map.ptr<float>(r);
-            for (int c = 0; c < cols; c++) {
-                depth_row[c] = (disp_row[c] > 1.0f) ? (float)(bf_ / disp_row[c]) : 0.0f;
+        // Depth topic: compute depth from disparity only when someone cares.
+        const bool publish_depth = (depth_pub_->get_subscription_count() > 0);
+        if (publish_depth) {
+            // Disparity -> depth at model resolution.
+            for (int r = 0; r < disp_h_; ++r) {
+                const float* disp_row  = disp_model.ptr<float>(r);
+                float*       depth_row = depth_model_.ptr<float>(r);
+                for (int c = 0; c < disp_w_; ++c) {
+                    float d = disp_row[c];
+                    depth_row[c] = (d > 1.0f) ? static_cast<float>(bf_model_ / d) : 0.0f;
+                }
             }
-        }
-
-        // Normalize full-res depth to uint8
-        depth_map.convertTo(depth_norm_, CV_8UC1, 255.0 / max_depth_m_);
-
-        // Resize mono8 BEFORE colormap — much cheaper than resizing bgr8
-        int pub_size = color_publish_size_;
-        cv::resize(depth_norm_, depth_norm_small_, cv::Size(pub_size, pub_size), 0, 0, cv::INTER_AREA);
-
-        // Colormap on small image, directly into pre-allocated message buffer
-        cv::Mat depth_color(pub_size, pub_size, CV_8UC3, depth_color_msg_.data.data());
-        cv::applyColorMap(depth_norm_small_, depth_color, cv::COLORMAP_TURBO);
-
-        // Zero-mask using pre-allocated buffer
-        cv::compare(depth_norm_small_, cv::Scalar(0), zero_mask_, cv::CMP_EQ);
-        depth_color.setTo(cv::Scalar(0, 0, 0), zero_mask_);
-
-        // Publish (ROS copies internally, but no per-frame allocation)
-        depth_msg_.header.stamp = left_msg->header.stamp;
-        depth_color_msg_.header.stamp = left_msg->header.stamp;
-        if (depth_pub_->get_subscription_count() > 0) {
+            // Write into the pre-allocated depth_msg_ buffer. When publishing
+            // at model resolution (the default), the resize is a no-op copy;
+            // when opting into source-res publishing, it's a 480 -> source
+            // bilinear upsize of a float image (~10-15 ms).
+            cv::Mat depth_out(depth_msg_.height, depth_msg_.width, CV_32FC1,
+                              depth_msg_.data.data());
+            if (depth_out.rows == depth_model_.rows && depth_out.cols == depth_model_.cols) {
+                std::memcpy(depth_out.data, depth_model_.data,
+                            static_cast<size_t>(depth_out.rows) * depth_out.cols * sizeof(float));
+            } else {
+                cv::resize(depth_model_, depth_out, depth_out.size(), 0, 0, cv::INTER_LINEAR);
+            }
+            depth_msg_.header.stamp = left_msg->header.stamp;
             depth_pub_->publish(depth_msg_);
         }
+
+        // Colorize disparity directly (gives better near-field contrast than depth).
+        // Match the reference ./stereo_trt auto-scale: vmin=0, vmax=max(1, dmax).
+        // The fixed-192 scale used previously made close-range disparities dim.
+        const int pub_size = color_publish_size_;
+        cv::resize(disp_model, disp_small_, cv::Size(pub_size, pub_size), 0, 0, cv::INTER_AREA);
+
+        double dmin = 0.0, dmax = 0.0;
+        cv::minMaxLoc(disp_small_, &dmin, &dmax);
+        const double vmax = std::max(1.0, dmax);
+        const double disp_scale = 255.0 / vmax;
+        disp_small_.convertTo(disp_norm_small_, CV_8UC1, disp_scale);
+
+        cv::Mat depth_color(pub_size, pub_size, CV_8UC3, depth_color_msg_.data.data());
+        cv::applyColorMap(disp_norm_small_, depth_color, cv::COLORMAP_TURBO);
+
+        // Zero-out pixels that had no valid disparity.
+        cv::compare(disp_norm_small_, cv::Scalar(1), zero_mask_, cv::CMP_LT);
+        depth_color.setTo(cv::Scalar(0, 0, 0), zero_mask_);
+
+        depth_color_msg_.header.stamp = left_msg->header.stamp;
         depth_color_pub_->publish(depth_color_msg_);
+
+        const auto t_end = std::chrono::steady_clock::now();
+        const double ms_preproc = std::chrono::duration<double, std::milli>(t_preproc - t0).count();
+        const double ms_infer_wall = std::chrono::duration<double, std::milli>(t_infer - t_preproc).count();
+        const double ms_post    = std::chrono::duration<double, std::milli>(t_end - t_infer).count();
+        const double ms_total   = std::chrono::duration<double, std::milli>(t_end - t0).count();
+        if (frame_id_ % 10 == 0) {
+            RCLCPP_INFO(this->get_logger(),
+                "[profile] cpu_pre=%.1f  gpu_wall=%.1f [prep=%.1f trt=%.1f d2h=%.1f]  post=%.1f  total=%.1f ms  disp[%.1f,%.1f]  pub_depth=%d",
+                ms_preproc, ms_infer_wall,
+                engine_->lastUploadMs(), engine_->lastInferMs(), engine_->lastD2hMs(),
+                ms_post, ms_total, dmin, dmax, publish_depth ? 1 : 0);
+        }
+        ++frame_id_;
     }
 
     cv::Mat msgToMatNoCopy(const sensor_msgs::msg::Image::ConstSharedPtr& msg)
@@ -447,9 +544,7 @@ private:
                        const_cast<uint8_t*>(msg->data.data()), msg->step);
     }
 
-    std::unique_ptr<StereoTRTEngine> engine_;
-    std::unique_ptr<StereoPreprocessor> left_preproc_;
-    std::unique_ptr<StereoPreprocessor> right_preproc_;
+    std::unique_ptr<FFStereoEngine> engine_;
 
     message_filters::Subscriber<sensor_msgs::msg::Image> left_sub_;
     message_filters::Subscriber<sensor_msgs::msg::Image> right_sub_;
@@ -459,22 +554,33 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr depth_color_pub_;
 
-    double max_disparity_;
-    int warmup_iterations_;
-    bool warmup_done_;
+    // Model geometry (filled after engine load)
+    int model_h_ = 0, model_w_ = 0;
+    int disp_h_ = 0,  disp_w_ = 0;
 
-    // Depth conversion parameters
+    double max_disparity_     = 192.0;
+    int    warmup_iterations_ = 5;
+    int    depth_publish_size_ = 480;
+
+    // Depth conversion
     double baseline_m_, focal_length_mm_, sensor_width_mm_, max_depth_m_;
-    double focal_length_px_ = 0.0, bf_ = 0.0;
-    bool depth_initialized_ = false;
+    double focal_length_px_model_ = 0.0, bf_model_ = 0.0;
+    bool   depth_initialized_     = false;
 
-    // Pre-allocated buffers (zero-allocation hot path)
-    cv::Mat disp_full_;
-    cv::Mat disp_resized_;
-    cv::Mat depth_norm_;        // CV_8UC1 - normalized for colormap
-    cv::Mat depth_norm_small_;  // CV_8UC1 - resized for colormap
-    cv::Mat zero_mask_;         // CV_8UC1 - pre-allocated mask
-    int color_publish_size_ = 480;
+    // Pre-allocated preprocessing buffers (model-resolution uint8 RGB HWC).
+    cv::Mat left_resized_;
+    cv::Mat right_resized_;
+
+    // Rolling frame counter for timing log cadence.
+    size_t frame_id_ = 0;
+
+    // Pre-allocated postprocessing buffers
+    cv::Mat depth_model_;     // CV_32FC1 — model-resolution depth
+    cv::Mat disp_small_;      // CV_32FC1 — resized disparity for colorization
+    cv::Mat disp_norm_small_; // CV_8UC1  — normalized for colormap
+    cv::Mat zero_mask_;       // CV_8UC1  — pre-allocated mask
+    int     color_publish_size_ = 480;
+
     sensor_msgs::msg::Image depth_msg_;
     sensor_msgs::msg::Image depth_color_msg_;
 };

@@ -11,7 +11,7 @@ camera:
 
 camera_stereo:
     ros__parameters:
-        resource:           "/dev/video0"   # Arducam stereo camera
+        resource:           "/dev/video1"   # Arducam stereo camera
         width:              3840        # Full stereo width (1920 left + 1920 right)
         height:             1200        # Stereo height (output will be 1200x1200 per eye)
         framerate:          30
@@ -24,11 +24,17 @@ camera_stereo:
 
 stereo_depth:
     ros__parameters:
-        model:                  "stereo-depth/LightStereo-S-KITTI.engine"
-        max_disparity:          192.0
+        # Fast-FoundationStereo (single TRT engine + GWC CUDA plugin)
+        engine:                 "stereo-depth/stereo_plugin.engine"
+        plugin:                 "stereo-depth/libgwc_plugin.so"
+        max_disparity:          192.0   # Must match the value baked into the engine
         warmup_iterations:      5
+        baseline_mm:            100.0
+        focal_length_mm:        3.6
+        sensor_width_mm:        5.76
         max_depth_m:            50.0    # Max depth clamp for colorized visualization (meters)
         color_publish_size:     480     # Resolution for colorized depth visualization
+        depth_publish_size:     0       # /depth topic res: 0=native source, 480=fast model-res (saves ~15ms)
 preview:
     ros__parameters:
         output:             "display://0"
@@ -63,6 +69,23 @@ classify:
 lanedet:
     ros__parameters:
         model:              "lane_detect.engine"
+
+gui:
+    ros__parameters:
+        enable_3d_boxes:    false       # Draw 3D wireframe boxes using stereo depth
+
+bev:
+    ros__parameters:
+        bev_width:              480
+        bev_height:             360
+        pixels_per_meter:       10.0        # 10 px/m = ~48m x 36m visible range
+        max_bev_range_m:        40.0        # Max depth to include in BEV
+        camera_height_m:        1.2         # Camera mount height for flat ground assumption
+        map_retention_sec:      30.0        # How long accumulated map points persist
+        max_map_points:         10000       # Ring buffer capacity
+        enable_ground_plane:    false       # Sparse depth ground plane sampling
+        render_rate_hz:         10          # BEV rendering frequency
+        gyro_alpha:             0.98        # Complementary filter: gyro vs GPS heading weight
 
 driver_monitor:
     ros__parameters:

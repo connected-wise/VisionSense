@@ -97,7 +97,7 @@ std::vector<std::vector<std::vector<float>>> run_engine(std::vector<cv::Mat> ima
         throw std::runtime_error("Unable to run inference.");
     }
 
-    std::cout << "running classifier engine.." << std::endl;
+    //std::cout << "running classifier engine.." << std::endl;
     return featureVectors;
 }
 
@@ -115,7 +115,7 @@ void signs_callback(visionconnect::msg::Signs::SharedPtr input)
         //cv::waitKey(1);
         images.push_back(cpu_img);
     }
-    std::cout << "running classifier callback: " << images.size() << std::endl;
+    //std::cout << "running classifier callback: " << images.size() << std::endl;
     
     if (images.size() == 0)
     {

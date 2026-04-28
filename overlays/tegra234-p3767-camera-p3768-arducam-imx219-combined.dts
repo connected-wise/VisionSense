@@ -415,8 +415,8 @@
 							compatible = "arducam,arducam-csi2";
 							reg = <0x0c>;
 							devnode = "video1";
-							physical_w = "3.680";
-							physical_h = "2.760";
+							physical_w = "5.760";
+							physical_h = "3.600";
 							sensor_model = "arducam-csi2";
 							use_sensor_mode_id = "true";
 
@@ -429,16 +429,16 @@
 								dpcm_enable = "false";
 								cil_settletime = "0";
 								lane_polarity = "0";
-								active_w = "3264";
-								active_h = "2464";
+								active_w = "3840";
+								active_h = "1200";
 								mode_type = "bayer";
-								pixel_phase = "rggb";
+								pixel_phase = "grbg";
 								csi_pixel_bit_depth = "10";
-								readout_orientation = "90";
-								line_length = "3448";
+								readout_orientation = "0";
+								line_length = "4400";
 								inherent_gain = "1";
-								mclk_multiplier = "9.33";
-								pix_clk_hz = "320000000";
+								mclk_multiplier = "6.67";
+								pix_clk_hz = "154000000";
 								gain_factor = "16";
 								framerate_factor = "1000000";
 								exposure_factor = "1000000";
@@ -449,9 +449,9 @@
 								min_hdr_ratio = "1";
 								max_hdr_ratio = "1";
 								min_framerate = "2000000";
-								max_framerate = "21000000";
+								max_framerate = "30000000";
 								step_framerate = "1";
-								default_framerate = "21000000";
+								default_framerate = "30000000";
 								min_exp_time = "13";
 								max_exp_time = "683709";
 								step_exp_time = "1";

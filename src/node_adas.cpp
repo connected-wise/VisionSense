@@ -55,14 +55,11 @@ public:
                 // First high-quality detection: set calibrated center close to lane center
                 calibrated_camera_center_x_ = current_lane_midpoint;
                 is_camera_center_initialized_ = true;
-                ROS_INFO("Camera center initialized to lane midpoint: %.2f", calibrated_camera_center_x_);
             } else {
                 // Gradual convergence using exponential moving average
                 float old_center = calibrated_camera_center_x_;
                 calibrated_camera_center_x_ = (1.0f - convergence_rate_) * calibrated_camera_center_x_ + 
                                              convergence_rate_ * current_lane_midpoint;
-                ROS_DEBUG("Camera center calibrated: %.2f -> %.2f (lane: %.2f, quality: %.2f)", 
-                         old_center, calibrated_camera_center_x_, current_lane_midpoint, lane_quality_score);
             }
         }
     }
@@ -239,7 +236,6 @@ public:
         }
         
         if (lane_polylines.size() < 2) {
-            ROS_WARN("Insufficient lane data for ADAS processing");
             return adas_msg;
         }
         
@@ -266,16 +262,10 @@ public:
         
         if (valid_lane_by_color[1] && lane_polylines.size() > 1) {
             green_lane = extrapolateLane(lane_polylines[1], max_height_y);
-            ROS_INFO("Green lane extrapolated: valid=%d, top=(%.3f,%.3f), bottom=(%.3f,%.3f)", 
-                     green_lane.valid, green_lane.top_point.x, green_lane.top_point.y,
-                     green_lane.bottom_point.x, green_lane.bottom_point.y);
         }
         
         if (valid_lane_by_color[2] && lane_polylines.size() > 2) {
             red_lane = extrapolateLane(lane_polylines[2], max_height_y);
-            ROS_INFO("Red lane extrapolated: valid=%d, top=(%.3f,%.3f), bottom=(%.3f,%.3f)", 
-                     red_lane.valid, red_lane.top_point.x, red_lane.top_point.y,
-                     red_lane.bottom_point.x, red_lane.bottom_point.y);
         }
         
         // Calculate lane departure if both center lane boundaries are valid
@@ -284,17 +274,9 @@ public:
             float green_x_normalized = green_lane.bottom_point.x;
             float red_x_normalized = red_lane.bottom_point.x;
             
-            // Debug: Print bottom points 
-            ROS_INFO("Bottom Points Normalized - Green: (%.3f,%.3f), Red: (%.3f,%.3f)", 
-                     green_lane.bottom_point.x, green_lane.bottom_point.y,
-                     red_lane.bottom_point.x, red_lane.bottom_point.y);
-            
             // Current lane center midpoint at vehicle position (normalized)
             float current_lane_midpoint_normalized = (green_x_normalized + red_x_normalized) / 2.0f;
             float camera_center_normalized = getCalibratedCameraCenter() / float(image_width_);
-            
-            ROS_INFO("Normalized coordinates - Green: %.3f, Red: %.3f, Midpoint: %.3f, Camera: %.3f", 
-                     green_x_normalized, red_x_normalized, current_lane_midpoint_normalized, camera_center_normalized);
             
             // Calculate combined lane quality score
             float combined_lane_quality = (green_lane.quality_score + red_lane.quality_score) / 2.0f;
@@ -342,12 +324,8 @@ public:
             if (abs_deviation_normalized > 0.05f) { // Threshold for lane departure warning (5% of image width)
                 if (deviation_normalized < 0) {
                     adas_msg.lane_change_left = true;
-                    ROS_INFO("Lane departure left detected, deviation: %.3f (%.1f%%) - Camera: %.3f, Lane: %.3f", 
-                             deviation_normalized, deviation_normalized * 100.0f, camera_center_normalized, current_lane_midpoint_normalized);
                 } else {
                     adas_msg.lane_change_right = true;
-                    ROS_INFO("Lane departure right detected, deviation: %.3f (%.1f%%) - Camera: %.3f, Lane: %.3f", 
-                             deviation_normalized, deviation_normalized * 100.0f, camera_center_normalized, current_lane_midpoint_normalized);
                 }
             }
         } else {
@@ -371,8 +349,6 @@ void lanes_callback(const visionconnect::msg::Lanes::SharedPtr input) {
         // Debug output
         if (adas_msg.lane_change_left || adas_msg.lane_change_right) {
             std::string direction = adas_msg.lane_change_left ? "left" : "right";
-            ROS_INFO("ADAS Alert: Lane change %s detected, offset: %.2f px", 
-                     direction.c_str(), adas_msg.lane_center_offset);
         }
     }
 }

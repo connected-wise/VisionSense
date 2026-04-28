@@ -277,9 +277,7 @@ void postprocess(std::vector<float> &featureVector, const std::vector<nvinfer1::
             classifier_msg.boxes.push_back(detect_box);
         }
 
-        // Redo box and draw for scaled down image
-        cv::Rect_<float> bbox = cv::Rect(bboxes[index].x / 3, bboxes[index].y / 3, bboxes[index].width / 3, bboxes[index].height / 3);
-        cv::rectangle(output, bbox, colors[(int)labels[index]], 4);
+        // Box drawing handled by GUI node — skip here to avoid duplicate/miscolored boxes
         
         // Track ID drawing disabled - only GUI node draws labels
         // if (!custom_track_id.empty()) {

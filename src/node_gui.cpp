@@ -19,6 +19,10 @@
 #include <iomanip>
 #include <sstream>
 #include <numeric>
+#ifdef Success
+#undef Success  // X11 defines 'Success' which conflicts with Eigen
+#endif
+#include <Eigen/Dense>
 
 visionconnect::msg::Detect::SharedPtr detect_msg = NULL;
 visionconnect::msg::Signs::SharedPtr signs_msg = NULL;
@@ -32,8 +36,10 @@ int screen_height = 1080;
 cv::Mat driver_monitor_image;
 cv::Mat stereo_depth_colored;      // Pre-colorized disparity for display (updated in callback)
 cv::Mat last_main_view;            // Last fused main view (for timer-based refresh)
+cv::Mat bev_display;               // Bird's Eye View image from BEV node
 std::mutex depth_mutex;
 std::mutex main_view_mutex;
+std::mutex bev_mutex;
 std::string driver_state = "UNKNOWN";
 double accel_x = 0.0, accel_y = 0.0, accel_z = 0.0;
 double gyro_x = 0.0, gyro_y = 0.0, gyro_z = 0.0;
@@ -43,6 +49,36 @@ std::string gps_fix_status = "NO FIX";
 
 // Depth legend config (must match stereo_depth node's max_depth_m)
 constexpr float DEPTH_LEGEND_MAX_M = 50.0f;
+
+// 3D bounding box support
+cv::Mat stereo_depth_raw;             // Raw 32FC1 depth map in meters
+std::mutex raw_depth_mutex;
+bool enable_3d_boxes = true;
+
+// Camera intrinsics (1200x1200 stereo left image)
+constexpr float CAM_FX = 750.0f;
+constexpr float CAM_FY = 750.0f;
+constexpr float CAM_CX = 600.0f;
+constexpr float CAM_CY = 600.0f;
+
+// Class-based size priors {length, width, height} in meters
+// Index: 0=pedestrian, 1=cyclist, 2=car, 3=bus, 4=truck, 5=train
+struct SizePrior { float length, width, height; };
+constexpr SizePrior SIZE_PRIORS[] = {
+    {0.5f, 0.5f, 1.7f},   // pedestrian
+    {1.8f, 0.8f, 1.7f},   // cyclist
+    {4.5f, 1.8f, 1.5f},   // car
+    {12.0f, 2.6f, 3.5f},  // bus
+    {8.0f, 2.5f, 3.0f},   // truck
+    {15.0f, 3.0f, 4.0f},  // train
+};
+
+struct OrientedBox3D {
+    float cx, cy, cz;           // 3D center in camera frame (meters)
+    float length, width, height; // oriented dimensions
+    float yaw;                   // rotation around Y-axis (radians)
+    bool valid = false;
+};
 
 // Declare publishers
 Publisher<sensor_msgs::Image> gui_pub = NULL;
@@ -166,14 +202,146 @@ cv::Mat createSummaryPanel(int width, int height)
     return panel;
 }
 
+// Draw compact status overlay on the main detection image (bottom-left corner)
+void drawStatusOverlay(cv::Mat& img)
+{
+    if (img.empty()) return;
+
+    // --- Gather data ---
+    int nv = 0, np = 0, nc = 0;
+    if (detect_msg != NULL) {
+        for (uint16_t i = 0; i < detect_msg->num_detections; ++i) {
+            int cls = static_cast<int>(detect_msg->classes[i]);
+            if (cls >= 2 && cls <= 4) nv++;
+            else if (cls == 0) np++;
+            else if (cls == 1) nc++;
+        }
+    }
+    int nl = (lanes_msg != NULL) ? lanes_msg->num_lanes : 0;
+
+    // --- Layout ---
+    const int row_h = 16;
+    const int pad_x = 8;
+    const int pad_y = 5;
+    const int rows = 3;
+    const int bar_h = pad_y * 2 + rows * row_h;
+    const int bar_w = 330;
+    const int ox = 6;
+    const int oy = img.rows - bar_h - 6;
+    const double fs = 0.34;
+    const int font = cv::FONT_HERSHEY_SIMPLEX;
+
+    // --- Background: rounded-corner look via filled rect + border ---
+    cv::Rect bg(ox, oy, bar_w, bar_h);
+    bg &= cv::Rect(0, 0, img.cols, img.rows);
+    if (bg.width <= 0 || bg.height <= 0) return;
+
+    // Darken background
+    img(bg) *= 0.25;
+    // Subtle border
+    cv::rectangle(img, bg, cv::Scalar(80, 80, 80), 1, cv::LINE_AA);
+    // Top accent line (amber)
+    cv::line(img, cv::Point(bg.x + 1, bg.y), cv::Point(bg.x + bg.width - 1, bg.y),
+             cv::Scalar(255, 200, 0), 1, cv::LINE_AA);
+
+    // --- Colors ---
+    cv::Scalar col_label(130, 130, 140);   // dim label
+    cv::Scalar col_value(220, 220, 225);   // bright value
+    cv::Scalar col_accent(255, 200, 0);    // amber accent
+    cv::Scalar col_green(80, 230, 80);
+    cv::Scalar col_red(80, 80, 240);
+    cv::Scalar col_warn(0, 165, 255);
+
+    int tx = ox + pad_x;
+    int ty = oy + pad_y + 11;
+    char text[64];
+
+    // --- Row 1: Detection counts with colored badges + driver state ---
+    // Vehicle count (green tint)
+    snprintf(text, sizeof(text), "%d", nv);
+    cv::putText(img, text, cv::Point(tx, ty), font, fs, col_green, 1, cv::LINE_AA);
+    int tw = cv::getTextSize(text, font, fs, 1, nullptr).width;
+    cv::putText(img, "V", cv::Point(tx + tw + 1, ty), font, fs * 0.85, col_label, 1, cv::LINE_AA);
+    tx += tw + 14;
+
+    // Pedestrian count (amber)
+    snprintf(text, sizeof(text), "%d", np);
+    cv::putText(img, text, cv::Point(tx, ty), font, fs, col_accent, 1, cv::LINE_AA);
+    tw = cv::getTextSize(text, font, fs, 1, nullptr).width;
+    cv::putText(img, "P", cv::Point(tx + tw + 1, ty), font, fs * 0.85, col_label, 1, cv::LINE_AA);
+    tx += tw + 14;
+
+    // Cyclist count (cyan)
+    snprintf(text, sizeof(text), "%d", nc);
+    cv::putText(img, text, cv::Point(tx, ty), font, fs, cv::Scalar(255, 200, 100), 1, cv::LINE_AA);
+    tw = cv::getTextSize(text, font, fs, 1, nullptr).width;
+    cv::putText(img, "C", cv::Point(tx + tw + 1, ty), font, fs * 0.85, col_label, 1, cv::LINE_AA);
+    tx += tw + 18;
+
+    // Separator dot
+    cv::circle(img, cv::Point(tx, ty - 4), 2, col_label, -1, cv::LINE_AA);
+    tx += 10;
+
+    // Lanes
+    snprintf(text, sizeof(text), "%d", nl);
+    cv::putText(img, text, cv::Point(tx, ty), font, fs, col_value, 1, cv::LINE_AA);
+    tw = cv::getTextSize(text, font, fs, 1, nullptr).width;
+    cv::putText(img, "Lanes", cv::Point(tx + tw + 2, ty), font, fs * 0.85, col_label, 1, cv::LINE_AA);
+    tx += tw + 40;
+
+    // Separator dot
+    cv::circle(img, cv::Point(tx, ty - 4), 2, col_label, -1, cv::LINE_AA);
+    tx += 10;
+
+    // Driver state with color coding
+    cv::Scalar drv_color = col_value;
+    if (driver_state == "DROWSY" || driver_state == "NO_DRIVER") drv_color = col_red;
+    else if (driver_state == "DISTRACTED") drv_color = col_warn;
+    else if (driver_state == "ALERT") drv_color = col_green;
+    cv::putText(img, driver_state.c_str(), cv::Point(tx, ty), font, fs, drv_color, 1, cv::LINE_AA);
+
+    // --- Row 2: GPS ---
+    tx = ox + pad_x;
+    ty += row_h;
+
+    cv::Scalar gps_color = (gps_satellites > 0) ? col_green : col_red;
+    // GPS status indicator dot
+    cv::circle(img, cv::Point(tx + 3, ty - 4), 3, gps_color, -1, cv::LINE_AA);
+    tx += 12;
+
+    cv::putText(img, "GPS", cv::Point(tx, ty), font, fs * 0.85, col_label, 1, cv::LINE_AA);
+    tx += 26;
+
+    snprintf(text, sizeof(text), "%.5f, %.5f", latitude, longitude);
+    cv::putText(img, text, cv::Point(tx, ty), font, fs, col_value, 1, cv::LINE_AA);
+    tw = cv::getTextSize(text, font, fs, 1, nullptr).width;
+    tx += tw + 10;
+
+    snprintf(text, sizeof(text), "%.0fm", altitude);
+    cv::putText(img, text, cv::Point(tx, ty), font, fs * 0.9, col_label, 1, cv::LINE_AA);
+
+    // --- Row 3: IMU ---
+    tx = ox + pad_x;
+    ty += row_h;
+
+    cv::putText(img, "IMU", cv::Point(tx, ty), font, fs * 0.85, col_label, 1, cv::LINE_AA);
+    tx += 28;
+
+    snprintf(text, sizeof(text), "%.1f  %.1f  %.1f", accel_x, accel_y, accel_z);
+    cv::putText(img, text, cv::Point(tx, ty), font, fs, col_value, 1, cv::LINE_AA);
+    tw = cv::getTextSize(text, font, fs, 1, nullptr).width;
+    cv::putText(img, "m/s2", cv::Point(tx + tw + 4, ty), font, fs * 0.8, col_label, 1, cv::LINE_AA);
+}
+
 // Helper function to create composite display
 cv::Mat createCompositeDisplay(const cv::Mat& main_fused, int screen_width, int screen_height)
 {
     // Layout: Main 2/3 width full height, side panels 1/3 width × 1/3 height each
     int main_width = (screen_width * 2) / 3;
     int main_height = screen_height;
-    int side_width = screen_width / 3;
+    int side_width = screen_width - main_width;
     int side_height = screen_height / 3;
+    int side_height_bottom = screen_height - side_height * 2;  // absorb rounding remainder
 
     cv::Mat composite(screen_height, screen_width, CV_8UC3, cv::Scalar(0, 0, 0));
 
@@ -269,9 +437,24 @@ cv::Mat createCompositeDisplay(const cv::Mat& main_fused, int screen_width, int 
     cv::putText(composite, "STEREO DEPTH", cv::Point(main_width + 10, side_height + 25),
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
 
-    // Summary panel (bottom-right)
-    cv::Mat summary = createSummaryPanel(side_width, side_height);
-    summary.copyTo(composite(cv::Rect(main_width, side_height * 2, side_width, side_height)));
+    // BEV panel (bottom-right) - uses side_height_bottom to fill remaining space
+    cv::Mat bev_panel;
+    {
+        std::lock_guard<std::mutex> lock(bev_mutex);
+        if (!bev_display.empty()) {
+            cv::resize(bev_display, bev_panel, cv::Size(side_width, side_height_bottom));
+        }
+    }
+    if (bev_panel.empty()) {
+        bev_panel = cv::Mat(side_height_bottom, side_width, CV_8UC3, cv::Scalar(40, 42, 45));
+        cv::putText(bev_panel, "Bird's Eye View", cv::Point(side_width/2 - 80, side_height_bottom/2),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(150, 150, 150), 1);
+        cv::putText(bev_panel, "Waiting...", cv::Point(side_width/2 - 40, side_height_bottom/2 + 25),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(100, 100, 100), 1);
+    }
+    bev_panel.copyTo(composite(cv::Rect(main_width, side_height * 2, side_width, side_height_bottom)));
+    cv::putText(composite, "BIRD'S EYE VIEW", cv::Point(main_width + 10, side_height * 2 + 25),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
 
     return composite;
 }
@@ -446,6 +629,261 @@ void drawLaneChangeIndicator(cv::Mat &image)
                cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
 }
 
+// Extract median depth from the central region of a bounding box
+// Box coords are in full resolution (1200x1200). Returns depth in meters, or -1.0f on failure.
+float extract_box_depth(int bx, int by, int bw, int bh, const cv::Mat& depth_map)
+{
+    if (depth_map.empty() || depth_map.type() != CV_32FC1)
+        return -1.0f;
+
+    // Central 50% of the box (robust to edge noise)
+    int cx = bx + bw / 4;
+    int cy = by + bh / 4;
+    int cw = bw / 2;
+    int ch = bh / 2;
+
+    // Clamp to depth map bounds
+    cx = std::max(0, cx);
+    cy = std::max(0, cy);
+    if (cx + cw > depth_map.cols) cw = depth_map.cols - cx;
+    if (cy + ch > depth_map.rows) ch = depth_map.rows - cy;
+    if (cw <= 0 || ch <= 0)
+        return -1.0f;
+
+    // Collect valid depth samples
+    std::vector<float> samples;
+    samples.reserve(cw * ch);
+    for (int row = cy; row < cy + ch; row++) {
+        const float* ptr = depth_map.ptr<float>(row);
+        for (int col = cx; col < cx + cw; col++) {
+            float d = ptr[col];
+            if (std::isfinite(d) && d > 0.1f && d < 100.0f)
+                samples.push_back(d);
+        }
+    }
+
+    if (samples.size() < 5)
+        return -1.0f;
+
+    // Median via nth_element (O(n))
+    size_t mid = samples.size() / 2;
+    std::nth_element(samples.begin(), samples.begin() + mid, samples.end());
+    return samples[mid];
+}
+
+// Estimate oriented 3D bounding box via frustum back-projection + PCA
+// Box coords (bx,by,bw,bh) are in full resolution (1200x1200), depth_map is 32FC1 meters
+OrientedBox3D estimate_frustum_3d_box(int bx, int by, int bw, int bh,
+                                       const cv::Mat& depth_map, int cls)
+{
+    OrientedBox3D result{};
+    if (depth_map.empty() || depth_map.type() != CV_32FC1 || cls < 0 || cls > 5)
+        return result;
+
+    const SizePrior& prior = SIZE_PRIORS[cls];
+
+    // Clamp box to image bounds
+    int x0 = std::max(0, bx);
+    int y0 = std::max(0, by);
+    int x1 = std::min(depth_map.cols, bx + bw);
+    int y1 = std::min(depth_map.rows, by + bh);
+    if (x1 <= x0 || y1 <= y0) return result;
+
+    // Back-project pixels to 3D (subsample every 2nd pixel for speed)
+    std::vector<Eigen::Vector3f> points;
+    points.reserve(((x1 - x0) / 2 + 1) * ((y1 - y0) / 2 + 1));
+
+    for (int v = y0; v < y1; v += 2) {
+        const float* ptr = depth_map.ptr<float>(v);
+        for (int u = x0; u < x1; u += 2) {
+            float d = ptr[u];
+            if (!std::isfinite(d) || d <= 0.1f || d > 100.0f) continue;
+            float X = (u - CAM_CX) * d / CAM_FX;
+            float Y = (v - CAM_CY) * d / CAM_FY;
+            points.emplace_back(X, Y, d);
+        }
+    }
+
+    if (points.size() < 20) return result;
+
+    // Compute median Z for foreground segmentation
+    std::vector<float> z_vals;
+    z_vals.reserve(points.size());
+    for (const auto& p : points) z_vals.push_back(p.z());
+    size_t mid = z_vals.size() / 2;
+    std::nth_element(z_vals.begin(), z_vals.begin() + mid, z_vals.end());
+    float median_z = z_vals[mid];
+
+    // Segment foreground: keep points within ±tolerance of median
+    float tol = std::clamp(prior.length * 0.5f, 0.3f, 3.0f);
+    std::vector<Eigen::Vector3f> fg_pts;
+    fg_pts.reserve(points.size());
+    for (const auto& p : points) {
+        if (std::abs(p.z() - median_z) <= tol)
+            fg_pts.push_back(p);
+    }
+
+    if (fg_pts.size() < 10) return result;
+
+    // Compute centroid
+    Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+    for (const auto& p : fg_pts) centroid += p;
+    centroid /= static_cast<float>(fg_pts.size());
+
+    // PCA on XZ plane for yaw estimation
+    float yaw = 0.0f;
+    if (fg_pts.size() >= 50) {
+        Eigen::Matrix2f cov = Eigen::Matrix2f::Zero();
+        for (const auto& p : fg_pts) {
+            float dx = p.x() - centroid.x();
+            float dz = p.z() - centroid.z();
+            cov(0, 0) += dx * dx;
+            cov(0, 1) += dx * dz;
+            cov(1, 0) += dx * dz;
+            cov(1, 1) += dz * dz;
+        }
+        cov /= static_cast<float>(fg_pts.size());
+
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> solver(cov);
+        Eigen::Vector2f evals = solver.eigenvalues();
+        Eigen::Matrix2f evecs = solver.eigenvectors();
+
+        // Principal eigenvector (largest eigenvalue is last for SelfAdjoint)
+        Eigen::Vector2f principal = evecs.col(1); // (dx, dz)
+
+        // Only use PCA yaw if there's clear elongation
+        if (evals(1) > 1.5f * evals(0)) {
+            yaw = std::atan2(principal.x(), principal.y()); // atan2(X, Z)
+        }
+    }
+
+    // Rotate foreground points into oriented frame to measure extents
+    float cos_y = std::cos(-yaw), sin_y = std::sin(-yaw);
+    std::vector<float> lx_vals, ly_vals, lz_vals;
+    lx_vals.reserve(fg_pts.size());
+    ly_vals.reserve(fg_pts.size());
+    lz_vals.reserve(fg_pts.size());
+
+    for (const auto& p : fg_pts) {
+        float dx = p.x() - centroid.x();
+        float dy = p.y() - centroid.y();
+        float dz = p.z() - centroid.z();
+        // Rotate around Y axis
+        lx_vals.push_back(cos_y * dx - sin_y * dz);
+        ly_vals.push_back(dy);
+        lz_vals.push_back(sin_y * dx + cos_y * dz);
+    }
+
+    // Use 5th/95th percentile extents to reject outliers
+    auto percentile = [](std::vector<float>& v, float pct) -> float {
+        size_t idx = static_cast<size_t>(pct * (v.size() - 1));
+        idx = std::min(idx, v.size() - 1);
+        std::nth_element(v.begin(), v.begin() + idx, v.end());
+        return v[idx];
+    };
+
+    float lx_lo = percentile(lx_vals, 0.05f), lx_hi = percentile(lx_vals, 0.95f);
+    float ly_lo = percentile(ly_vals, 0.05f), ly_hi = percentile(ly_vals, 0.95f);
+    float lz_lo = percentile(lz_vals, 0.05f), lz_hi = percentile(lz_vals, 0.95f);
+
+    float meas_length = lz_hi - lz_lo;
+    float meas_width  = lx_hi - lx_lo;
+    float meas_height = ly_hi - ly_lo;
+
+    // Clamp dimensions to [0.5x, 1.2x] of class prior, or use pure priors if too few points
+    if (fg_pts.size() >= 50) {
+        result.length = std::clamp(meas_length, prior.length * 0.5f, prior.length * 1.2f);
+        result.width  = std::clamp(meas_width,  prior.width  * 0.5f, prior.width  * 1.2f);
+        result.height = std::clamp(meas_height, prior.height * 0.5f, prior.height * 1.2f);
+    } else {
+        result.length = prior.length;
+        result.width  = prior.width;
+        result.height = prior.height;
+    }
+
+    // Center position: use centroid XZ, fix Y so box top aligns with observed 5th-percentile Y
+    result.cx = centroid.x();
+    result.cz = centroid.z();
+    result.cy = ly_lo + centroid.y() + result.height * 0.5f;
+    result.yaw = yaw;
+    result.valid = true;
+    return result;
+}
+
+// Draw oriented 3D wireframe bounding box projected onto display image
+void draw_oriented_3d_box(cv::Mat& img, const OrientedBox3D& box, cv::Scalar color, int thickness)
+{
+    float hw = box.width  * 0.5f;
+    float hh = box.height * 0.5f;
+    float hl = box.length * 0.5f;
+
+    // 8 corners in local oriented frame (X=right, Y=down, Z=forward)
+    float local[8][3] = {
+        {-hw, -hh, -hl}, { hw, -hh, -hl}, { hw,  hh, -hl}, {-hw,  hh, -hl}, // back face
+        {-hw, -hh,  hl}, { hw, -hh,  hl}, { hw,  hh,  hl}, {-hw,  hh,  hl}, // front face
+    };
+
+    // Rotate by yaw around Y-axis and translate to world
+    float cos_y = std::cos(box.yaw), sin_y = std::sin(box.yaw);
+    cv::Point2f proj[8];
+    bool behind = false;
+
+    for (int i = 0; i < 8; i++) {
+        float rx = cos_y * local[i][0] + sin_y * local[i][2];
+        float ry = local[i][1];
+        float rz = -sin_y * local[i][0] + cos_y * local[i][2];
+
+        float X = rx + box.cx;
+        float Y = ry + box.cy;
+        float Z = rz + box.cz;
+
+        if (Z <= 0.0f) { behind = true; break; }
+
+        // Project to full-resolution pixel coords, then divide by 3 for display
+        float u = (CAM_FX * X / Z + CAM_CX) / 3.0f;
+        float v = (CAM_FY * Y / Z + CAM_CY) / 3.0f;
+        proj[i] = cv::Point2f(u, v);
+    }
+
+    if (behind) return;
+
+    // Determine which face is closer to camera for depth-based line thickness
+    float front_z = 0, back_z = 0;
+    for (int i = 0; i < 4; i++) back_z += local[i][2];
+    for (int i = 4; i < 8; i++) front_z += local[i][2];
+    // After rotation, recompute
+    float face_z[8];
+    for (int i = 0; i < 8; i++) {
+        face_z[i] = (-sin_y * local[i][0] + cos_y * local[i][2]) + box.cz;
+    }
+
+    int thin = std::max(1, thickness / 2);
+
+    // 12 edges: 4 bottom, 4 top, 4 vertical pillars
+    // Back face (indices 0-3)
+    auto edge = [&](int a, int b, bool is_back) {
+        int t = is_back ? thin : thickness;
+        cv::line(img, proj[a], proj[b], color, t, cv::LINE_AA);
+    };
+
+    // Determine which quad is "back" (farther average Z)
+    float avg_back = (face_z[0] + face_z[1] + face_z[2] + face_z[3]) / 4.0f;
+    float avg_front = (face_z[4] + face_z[5] + face_z[6] + face_z[7]) / 4.0f;
+    bool face0_is_back = (avg_back > avg_front);
+
+    // Back face edges (draw first, behind)
+    edge(0, 1, face0_is_back);  edge(1, 2, face0_is_back);
+    edge(2, 3, face0_is_back);  edge(3, 0, face0_is_back);
+
+    // Connecting pillars
+    edge(0, 4, true); edge(1, 5, true);
+    edge(2, 6, true); edge(3, 7, true);
+
+    // Front face edges (draw last, on top)
+    edge(4, 5, !face0_is_back); edge(5, 6, !face0_is_back);
+    edge(6, 7, !face0_is_back); edge(7, 4, !face0_is_back);
+}
+
 void fuse_data()
 {
     std::vector<cv::Scalar> colors = {
@@ -471,6 +909,16 @@ void fuse_data()
     auto local_signs_msg = signs_msg;
     auto local_adas_msg = adas_msg;
     cv::Mat local_driver_image = driver_monitor_image.clone();
+
+    // Snapshot raw depth for distance labels and 3D bounding boxes
+    cv::Mat local_depth;
+    try {
+        std::lock_guard<std::mutex> lock(raw_depth_mutex);
+        if (!stereo_depth_raw.empty())
+            local_depth = stereo_depth_raw.clone();
+    } catch (...) {
+        // Depth snapshot failed — proceed without depth
+    }
 
     auto img_msg = std::make_shared<sensor_msgs::msg::Image>(local_detect_msg->image);
     convert_message_to_frame(img_msg, img);
@@ -538,7 +986,86 @@ void fuse_data()
         signScores = local_signs_msg->scores;
     }
 
-    size_t j = 0; // index for sign and light labels
+    // --- Drawing style constants ---
+    const int FONT = cv::FONT_HERSHEY_DUPLEX;
+    const int LINE_TYPE = cv::LINE_AA;
+    const int PAD_X = 3;
+    const int PAD_Y = 2;
+
+    // Dynamic font scale: maps depth → font size (closer objects get larger labels)
+    // Returns scale in [0.28 .. 0.50] range, default 0.38 when no depth
+    auto depth_font_scale = [](float depth) -> double {
+        if (depth <= 0.0f) return 0.38;
+        if (depth < 3.0f) return 0.50;
+        if (depth > 40.0f) return 0.28;
+        // Linear interpolation: 3m→0.50, 40m→0.28
+        return 0.50 - (depth - 3.0f) * (0.22 / 37.0f);
+    };
+
+    auto fmt_score = [](float s) -> std::string {
+        int pct = static_cast<int>(s * 100.0f + 0.5f);
+        return std::to_string(pct) + "%";
+    };
+
+    // Draw label above box: translucent dark pill with colored text, no border
+    auto draw_label = [&](const std::string& text, int lx, int ly,
+                          cv::Scalar color, double scale) {
+        int thick = 1;
+        int bl = 0;
+        cv::Size ts = cv::getTextSize(text, FONT, scale, thick, &bl);
+        cv::Point tl(lx, ly - ts.height - PAD_Y * 2);
+        cv::Point br(lx + ts.width + PAD_X * 2, ly);
+
+        // Semi-transparent dark background
+        cv::Mat roi = img(cv::Rect(
+            std::max(0, tl.x), std::max(0, tl.y),
+            std::min(br.x, img.cols) - std::max(0, tl.x),
+            std::min(br.y, img.rows) - std::max(0, tl.y)));
+        roi *= 0.4;
+
+        // Colored text on dark background
+        cv::putText(img, text, cv::Point(lx + PAD_X, ly - PAD_Y),
+                    FONT, scale, color, thick, LINE_TYPE);
+    };
+
+    // Draw distance text centered below the box
+    auto draw_distance = [&](float depth, int bx, int by, int bw, int bh,
+                             cv::Scalar color, double scale) {
+        if (depth <= 0.0f) return;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.1fm", depth);
+        int thick = 1;
+        int bl = 0;
+        cv::Size ts = cv::getTextSize(buf, FONT, scale * 0.85, thick, &bl);
+        int tx = bx + (bw - ts.width) / 2;
+        int ty = by + bh + ts.height + 4;
+        if (ty > img.rows - 2) return;
+
+        // Subtle shadow for readability
+        cv::putText(img, buf, cv::Point(tx + 1, ty + 1),
+                    FONT, scale * 0.85, cv::Scalar(0, 0, 0), thick + 1, LINE_TYPE);
+        cv::putText(img, buf, cv::Point(tx, ty),
+                    FONT, scale * 0.85, color, thick, LINE_TYPE);
+    };
+
+    // 2D box: thin rectangle with bold corner accents
+    auto draw_box_2d = [&](int bx, int by, int bw, int bh, cv::Scalar color) {
+        // Thin full rectangle
+        cv::rectangle(img, cv::Rect(bx, by, bw, bh), color, 1, LINE_TYPE);
+        // Bold corner accents
+        int cl = std::max(4, std::min(12, std::min(bw, bh) / 4));
+        int ct = 2;
+        cv::line(img, {bx, by}, {bx + cl, by}, color, ct, LINE_TYPE);
+        cv::line(img, {bx, by}, {bx, by + cl}, color, ct, LINE_TYPE);
+        cv::line(img, {bx + bw, by}, {bx + bw - cl, by}, color, ct, LINE_TYPE);
+        cv::line(img, {bx + bw, by}, {bx + bw, by + cl}, color, ct, LINE_TYPE);
+        cv::line(img, {bx, by + bh}, {bx + cl, by + bh}, color, ct, LINE_TYPE);
+        cv::line(img, {bx, by + bh}, {bx, by + bh - cl}, color, ct, LINE_TYPE);
+        cv::line(img, {bx + bw, by + bh}, {bx + bw - cl, by + bh}, color, ct, LINE_TYPE);
+        cv::line(img, {bx + bw, by + bh}, {bx + bw, by + bh - cl}, color, ct, LINE_TYPE);
+    };
+
+    size_t j = 0;
     cv::String label = "";
     int baseline = 0;
 
@@ -548,125 +1075,76 @@ void fuse_data()
         int y = static_cast<int>(boxes[i].data[1]/3);
         int w = static_cast<int>(boxes[i].data[2]/3);
         int h = static_cast<int>(boxes[i].data[3]/3);
+        int cls = static_cast<int>(classes[i]);
 
-        if (classes[i] == 0) // if pedestrian
+        // --- Physical objects (classes 0-5): single pass 2D/3D ---
+        if (cls >= 0 && cls <= 5)
         {
+            const char* short_names[] = {"pedestrian", "cyclist", "car", "bus", "truck", "train"};
             if (!track_list[i].empty()) {
-                label = track_list[i] + " " + std::to_string(scores[i]).substr(0, 4);
+                label = track_list[i] + " " + fmt_score(scores[i]);
             } else {
-                label = "pedestrian " + std::to_string(scores[i]).substr(0, 4);
+                label = std::string(short_names[cls]) + " " + fmt_score(scores[i]);
             }
-            cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-            cv::Point topLeft(x, y - textSize.height); 
-            cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), colors[classes[i]], cv::FILLED);
-            cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);
-            if (scores[i] > 0.7)
-                cv::rectangle(img, cv::Rect(x, y, w, h), cv::Scalar(0, 0, 255), 4);
-        }
 
-        else if (classes[i] == 1) // if cyclist
-        {
-            if (!track_list[i].empty()) {
-                label = track_list[i] + " " + std::to_string(scores[i]).substr(0, 4);
+            cv::Scalar box_color = colors[cls];
+            if ((cls == 0 || cls == 1) && scores[i] > 0.7)
+                box_color = cv::Scalar(0, 0, 255);
+
+            // Depth + optional 3D box estimation
+            float depth = -1.0f;
+            OrientedBox3D obox{};
+            int full_x = static_cast<int>(boxes[i].data[0]);
+            int full_y = static_cast<int>(boxes[i].data[1]);
+            int full_w = static_cast<int>(boxes[i].data[2]);
+            int full_h = static_cast<int>(boxes[i].data[3]);
+            if (!local_depth.empty()) {
+                if (enable_3d_boxes) {
+                    obox = estimate_frustum_3d_box(full_x, full_y, full_w, full_h, local_depth, cls);
+                    if (obox.valid) depth = obox.cz;
+                }
+                if (depth <= 0.0f)
+                    depth = extract_box_depth(full_x, full_y, full_w, full_h, local_depth);
+            }
+
+            double fscale = depth_font_scale(depth);
+
+            if (obox.valid) {
+                draw_oriented_3d_box(img, obox, box_color, 2);
             } else {
-                label = "cyclist " + std::to_string(scores[i]).substr(0, 4);
+                draw_box_2d(x, y, w, h, box_color);
             }
-            cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-            cv::Point topLeft(x, y - textSize.height); 
-            cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), colors[classes[i]], cv::FILLED);
-            cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);
-            if (scores[i] > 0.7)
-                cv::rectangle(img, cv::Rect(x, y, w, h), cv::Scalar(0, 0, 255), 4);
+            draw_label(label, x, y, box_color, fscale);
+            draw_distance(depth, x, y, w, h, box_color, fscale);
         }
 
-        else if (classes[i] == 2) // if vehicle-car
-        {
-            if (!track_list[i].empty()) {
-                label = track_list[i] + " " + std::to_string(scores[i]).substr(0, 4);
-            } else {
-                label = "vehicle-car " + std::to_string(scores[i]).substr(0, 4);
-            }
-            cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-            cv::Point topLeft(x, y - textSize.height); 
-            cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), colors[classes[i]], cv::FILLED);
-            cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);
-            cv::rectangle(img, cv::Rect(x, y, w, h), colors[classes[i]], 4);
-
-        }
-        
-        else if (classes[i] == 3) // if vehicle-bus
-        {
-            if (!track_list[i].empty()) {
-                label = track_list[i] + " " + std::to_string(scores[i]).substr(0, 4);
-            } else {
-                label = "vehicle-bus " + std::to_string(scores[i]).substr(0, 4);
-            }
-            cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-            cv::Point topLeft(x, y - textSize.height); 
-            cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), colors[classes[i]], cv::FILLED);
-            cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);
-            cv::rectangle(img, cv::Rect(x, y, w, h), colors[classes[i]], 4);
-
-        }
-
-        else if (classes[i] == 4) // if vehicle-truck
-        {
-            if (!track_list[i].empty()) {
-                label = track_list[i] + " " + std::to_string(scores[i]).substr(0, 4);
-            } else {
-                label = "vehicle-truck " + std::to_string(scores[i]).substr(0, 4);
-            }
-            cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-            cv::Point topLeft(x, y - textSize.height); 
-            cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), colors[classes[i]], cv::FILLED);
-            cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);
-            cv::rectangle(img, cv::Rect(x, y, w, h), colors[classes[i]], 4);
-
-        }
-
-        else if (classes[i] == 5) // if vehicle-train
-        {
-            label = "vehicle-train " + std::to_string(scores[i]).substr(0, 4);
-            cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-            cv::Point topLeft(x, y - textSize.height); 
-            cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), colors[classes[i]], cv::FILLED);
-            cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);
-            cv::rectangle(img, cv::Rect(x, y, w, h), colors[classes[i]], 4);
-        }
-        
-        else if (classes[i] == 6 && j<signLabels.size() && j<signScores.size() && signScores[j]>0.5)  // if traffic light
+        else if (cls == 6 && j<signLabels.size() && j<signScores.size() && signScores[j]>0.5)
         {
             label = signLabels[j];
-            if (label == "red light") 
+            if (label == "red light")
             {
-                label = label +  " " + std::to_string(signScores[j]).substr(0, 4);  // add score to label
-                cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-                cv::Point topLeft(x, y - textSize.height);           
-                cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), cv::Scalar(0, 0, 255), cv::FILLED); // Red background
-                cv::rectangle(img, cv::Rect(x, y, w, h), cv::Scalar(0, 0, 255), 4);
-                cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);
+                label = label + " " + fmt_score(signScores[j]);
+                cv::Scalar c(0, 0, 255);
+                draw_box_2d(x, y, w, h, c);
+                draw_label(label, x, y, c, 0.38);
                 j++;
-            }              
+            }
 
             else if (label == "green light")
             {
-                label = label +  " " + std::to_string(signScores[j]).substr(0, 4);  // add score to label
-                cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-                cv::Point topLeft(x, y - textSize.height);  
-                cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), cv::Scalar(55, 235, 100), cv::FILLED); // Green background
-                cv::rectangle(img, cv::Rect(x, y, w, h), cv::Scalar(55, 235, 100), 4);
-                cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);
+                label = label + " " + fmt_score(signScores[j]);
+                cv::Scalar c(55, 235, 100);
+                draw_box_2d(x, y, w, h, c);
+                draw_label(label, x, y, c, 0.38);
                 j++;
             }
-                
+
             else if (label == "yellow light")
             {
-                label = label +  " " + std::to_string(signScores[j]).substr(0, 4);  // add score to label
-                cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-                cv::Point topLeft(x, y - textSize.height);  
-                cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), cv::Scalar(0, 255, 255), cv::FILLED); // Yellow background
-                cv::rectangle(img, cv::Rect(x, y, w, h), cv::Scalar(0, 255, 255), 4); 
-                cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);
+                label = label + " " + fmt_score(signScores[j]);
+                cv::Scalar c(0, 200, 255);
+                draw_box_2d(x, y, w, h, c);
+                draw_label(label, x, y, c, 0.38);
                 j++;
             }
             else
@@ -674,19 +1152,17 @@ void fuse_data()
                 j++;
                 continue;
             }
-            
+
         }
 
-        else if (classes[i] == 7 && j<signLabels.size() && j<signScores.size() && signScores[j]>0.65)  // if traffic sign
+        else if (cls == 7 && j<signLabels.size() && j<signScores.size() && signScores[j]>0.65)  // if traffic sign
         {
             label = signLabels[j];
             if (label != "guide sign")
             {
-                label = label +  " " + std::to_string(signScores[j]).substr(0, 4);  // add score to label
-                cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_PLAIN, 1, 1, &baseline);
-                cv::Point topLeft(x, y - textSize.height); 
-                cv::rectangle(img, topLeft, cv::Point(topLeft.x + textSize.width, topLeft.y + textSize.height + baseline), colors[classes[i]], cv::FILLED); 
-                cv::putText(img, label, cv::Point(x, y), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(255, 255, 255), 1);   
+                label = label + " " + fmt_score(signScores[j]);
+                draw_box_2d(x, y, w, h, colors[7]);
+                draw_label(label, x, y, colors[7], 0.38);
             }
             j++;
         }
@@ -1021,6 +1497,9 @@ void fuse_data()
     // Draw ADAS indicators on top of everything
     drawLaneChangeIndicator(img);
 
+    // Draw status overlay on main view (replaces bottom-right summary panel)
+    drawStatusOverlay(img);
+
     // Publish scene data
     publishSceneData();
 
@@ -1110,6 +1589,19 @@ void driver_state_callback(const std_msgs::msg::String::SharedPtr msg)
     }
 }
 
+// BEV image callback
+void bev_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+{
+    if (msg->data.empty() || msg->width == 0 || msg->height == 0) return;
+
+    if (msg->encoding == "bgr8") {
+        cv::Mat src(msg->height, msg->width, CV_8UC3,
+                    const_cast<uint8_t*>(msg->data.data()), msg->step);
+        std::lock_guard<std::mutex> lock(bev_mutex);
+        bev_display = src.clone();
+    }
+}
+
 // Stereo depth callback - applies colormap immediately for fast display
 void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
 {
@@ -1136,7 +1628,7 @@ void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
         // Apply colormap directly - no conversion needed
         cv::Mat disp_8u(msg->height, msg->width, CV_8UC1,
                        const_cast<uint8_t*>(msg->data.data()), msg->step);
-        cv::applyColorMap(disp_8u, colored, cv::COLORMAP_JET);
+        cv::applyColorMap(disp_8u, colored, cv::COLORMAP_TURBO);
         if (first_call) {
             ROS_INFO("Depth callback: mono8 %dx%d", msg->width, msg->height);
             first_call = false;
@@ -1154,7 +1646,7 @@ void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
         } else {
             normalized = cv::Mat::zeros(depth_float.size(), CV_8U);
         }
-        cv::applyColorMap(normalized, colored, cv::COLORMAP_JET);
+        cv::applyColorMap(normalized, colored, cv::COLORMAP_TURBO);
         if (first_call) {
             ROS_INFO("Depth callback: 32FC1 %dx%d", msg->width, msg->height);
             first_call = false;
@@ -1172,7 +1664,7 @@ void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
         } else {
             normalized = cv::Mat::zeros(depth_16u.size(), CV_8U);
         }
-        cv::applyColorMap(normalized, colored, cv::COLORMAP_JET);
+        cv::applyColorMap(normalized, colored, cv::COLORMAP_TURBO);
         if (first_call) {
             ROS_INFO("Depth callback: 16UC1 %dx%d", msg->width, msg->height);
             first_call = false;
@@ -1189,6 +1681,32 @@ void depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
     {
         std::lock_guard<std::mutex> lock(depth_mutex);
         stereo_depth_colored = colored;
+    }
+}
+
+// Raw depth callback for 3D bounding box support
+void raw_depth_callback(const sensor_msgs::msg::Image::SharedPtr msg)
+{
+    static bool first_call = true;
+    if (msg->encoding != "32FC1") {
+        if (first_call) {
+            ROS_WARN("Raw depth: expected 32FC1, got %s", msg->encoding.c_str());
+            first_call = false;
+        }
+        return;
+    }
+
+    cv::Mat depth(msg->height, msg->width, CV_32FC1,
+                  const_cast<uint8_t*>(msg->data.data()), msg->step);
+
+    {
+        std::lock_guard<std::mutex> lock(raw_depth_mutex);
+        stereo_depth_raw = depth.clone();
+    }
+
+    if (first_call) {
+        ROS_INFO("Raw depth callback: 32FC1 %dx%d", msg->width, msg->height);
+        first_call = false;
     }
 }
 
@@ -1278,17 +1796,57 @@ int main(int argc, char **argv)
     std::string package_share_directory = ament_index_cpp::get_package_share_directory("visionconnect");
 
     // Detect screen resolution using X11
+    bool resolution_detected = false;
     Display* disp = XOpenDisplay(NULL);
     if (disp) {
         Screen* scrn = DefaultScreenOfDisplay(disp);
         screen_width = scrn->width;
         screen_height = scrn->height;
         XCloseDisplay(disp);
-        ROS_INFO("Detected screen resolution: %dx%d", screen_width, screen_height);
+        resolution_detected = true;
+        ROS_INFO("Detected screen resolution via X11: %dx%d", screen_width, screen_height);
+    }
+    if (!resolution_detected) {
+        // Fallback: try xrandr to detect resolution
+        FILE* pipe = popen("xrandr 2>/dev/null | grep '\\*' | head -1 | awk '{print $1}'", "r");
+        if (pipe) {
+            char buf[64];
+            if (fgets(buf, sizeof(buf), pipe)) {
+                int w, h;
+                if (sscanf(buf, "%dx%d", &w, &h) == 2 && w > 0 && h > 0) {
+                    screen_width = w;
+                    screen_height = h;
+                    resolution_detected = true;
+                    ROS_INFO("Detected screen resolution via xrandr: %dx%d", screen_width, screen_height);
+                }
+            }
+            pclose(pipe);
+        }
+    }
+    if (!resolution_detected) {
+        ROS_WARN("Could not detect screen resolution, using default %dx%d", screen_width, screen_height);
+    }
+
+    // Allow overriding screen resolution via ROS parameters
+    node->declare_parameter("screen_width", 0);
+    node->declare_parameter("screen_height", 0);
+    int param_w = 0, param_h = 0;
+    node->get_parameter("screen_width", param_w);
+    node->get_parameter("screen_height", param_h);
+    if (param_w > 0 && param_h > 0) {
+        screen_width = param_w;
+        screen_height = param_h;
+        ROS_INFO("Screen resolution overridden by parameters: %dx%d", screen_width, screen_height);
     }
 
     cv::namedWindow("Perception Fusion", cv::WINDOW_NORMAL);
+    cv::resizeWindow("Perception Fusion", screen_width, screen_height);
     cv::setWindowProperty("Perception Fusion", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+
+    // Read 3D box config parameter
+    node->declare_parameter("enable_3d_boxes", true);
+    node->get_parameter("enable_3d_boxes", enable_3d_boxes);
+    ROS_INFO("3D bounding boxes: %s", enable_3d_boxes ? "enabled" : "disabled");
 
     // Use BEST_EFFORT QoS for image subscribers to prevent back-pressure
     rclcpp::QoS qos_best_effort(1);
@@ -1317,6 +1875,18 @@ int main(int argc, char **argv)
     auto driver_state_sub = ROS_CREATE_SUBSCRIBER(std_msgs::msg::String, "/driver_monitor/state", 2, driver_state_callback);
     auto depth_sub = node->create_subscription<sensor_msgs::Image>(
         "/stereo_depth/depth_color", qos_best_effort_2, depth_callback, depth_options);
+
+    // Raw depth subscription for 3D bounding boxes
+    auto raw_depth_cb_group = node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions raw_depth_options;
+    raw_depth_options.callback_group = raw_depth_cb_group;
+    auto raw_depth_sub = node->create_subscription<sensor_msgs::Image>(
+        "/stereo_depth/depth", qos_best_effort_2, raw_depth_callback, raw_depth_options);
+
+    // BEV node publishes under its own namespace "/bev" (set by ROS_CREATE_NODE
+    // in node_bev.cpp) so the full topic is /bev/image, not /bev/bev/image.
+    auto bev_sub = node->create_subscription<sensor_msgs::Image>(
+        "/bev/image", qos_best_effort_2, bev_callback);
     auto imu_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::Imu, "/imu_gps/imu/data", 2, imu_callback);
     auto gps_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::NavSatFix, "/imu_gps/gps/fix", 2, gps_callback);
 

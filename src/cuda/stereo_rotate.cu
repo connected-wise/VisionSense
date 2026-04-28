@@ -6,7 +6,12 @@
  *   Crop center 1440px: [right_cam:0-1199 | skip:1440 | left_cam:2640-3839]
  *
  * Non-rotated lenses (rotated_lenses=false):
- *   Crop 360px from sides: [skip:360 | left:360-1559 | gap:720 | right:2280-3479 | skip:360]
+ *   Inner-half crop, matching Fast-FoundationStereo/cpp_demo/stereo_trt.cu:
+ *   [skip:720 | left:720-1919 | right:1920-3119 | skip:720]
+ *   Each eye camera occupies one half of the sensor (0-1919 = left cam,
+ *   1920-3839 = right cam); we take the inner 1200 columns of each so the
+ *   two eyes' fields of view are adjacent and the stereo baseline matches
+ *   the reference demo exactly.
  */
 
 #include <cuda_runtime.h>
@@ -62,12 +67,12 @@ __global__ void stereoCropSplitKernel(
 
     int outIdx = outY * outputSize + outX;
 
-    // Crop 360px from left and right sides, then split remaining region
-    // Left output: cols 360 to 1559 (after left margin)
+    // Inner-half crop of each eye (matches ./stereo_trt reference).
+    // Left output: cols 720 to 1919 (inner half of left camera)
     int leftCamStart = cropMargin;
     leftOut[outIdx] = input[outY * stereoWidth + leftCamStart + outX];
 
-    // Right output: cols 2280 to 3479 (before right margin)
+    // Right output: cols 1920 to 3119 (inner half of right camera)
     int rightCamStart = stereoWidth - cropMargin - outputSize;
     rightOut[outIdx] = input[outY * stereoWidth + rightCamStart + outX];
 }
@@ -117,11 +122,12 @@ __global__ void stereoCropSplitFlipKernel(
             break;
     }
 
-    // Left output: cols 360 to 1559 (after left margin)
+    // Inner-half crop of each eye (matches ./stereo_trt reference).
+    // Left output: cols 720 to 1919 (inner half of left camera)
     int leftCamStart = cropMargin;
     leftOut[outIdx] = input[inY * stereoWidth + leftCamStart + inX_offset];
 
-    // Right output: cols 2280 to 3479 (before right margin)
+    // Right output: cols 1920 to 3119 (inner half of right camera)
     int rightCamStart = stereoWidth - cropMargin - outputSize;
     rightOut[outIdx] = input[inY * stereoWidth + rightCamStart + inX_offset];
 }
@@ -161,8 +167,9 @@ extern "C" cudaError_t cudaStereoCropSplit(
     cudaStream_t stream
 )
 {
-    // Crop 360px from each side: left region 360-1559, right region 2280-3479
-    int cropMargin = 360;
+    // Inner-half crop: left region 720-1919, right region 1920-3119
+    // Matches Fast-FoundationStereo/cpp_demo/stereo_trt.cu crop_split_rotate.
+    int cropMargin = 720;
 
     dim3 blockDim(16, 16);
     dim3 gridDim(
@@ -190,7 +197,9 @@ extern "C" cudaError_t cudaStereoCropSplitFlip(
     cudaStream_t stream
 )
 {
-    int cropMargin = 360;
+    // Inner-half crop: left region 720-1919, right region 1920-3119
+    // Matches Fast-FoundationStereo/cpp_demo/stereo_trt.cu crop_split_rotate.
+    int cropMargin = 720;
 
     dim3 blockDim(16, 16);
     dim3 gridDim(

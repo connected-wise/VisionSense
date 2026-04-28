@@ -33,9 +33,13 @@ public:
 } gLogger;
 
 // Face detection result
+struct Keypoint { float x, y, vis; };
+
 struct FaceBox {
     int x1, y1, x2, y2;
     float confidence;
+    Keypoint keypoints[5];  // 0=left_eye 1=right_eye 2=nose 3=left_mouth 4=right_mouth
+    bool has_keypoints = false;
 };
 
 // ============================================================================
@@ -64,8 +68,35 @@ public:
         engine_.reset(runtime_->deserializeCudaEngine(data.data(), size));
         context_.reset(engine_->createExecutionContext());
 
+        // Query actual output tensor dimensions to detect keypoint support
+        auto out_dims = engine_->getTensorShape("output0");
+        // Output shape: [1, num_outputs, num_detections] or [num_outputs, num_detections]
+        int num_outputs = 5;  // default: cx,cy,w,h,conf
+        if (out_dims.nbDims == 3) {
+            num_outputs = out_dims.d[1];
+        } else if (out_dims.nbDims == 2) {
+            num_outputs = out_dims.d[0];
+        }
+        num_outputs_ = num_outputs;
+        int kp_channels = num_outputs - 5;  // channels after cx,cy,w,h,conf
+        if (kp_channels >= 15) {
+            // 5 keypoints * 3 (x, y, vis)
+            has_keypoints_ = true;
+            kp_stride_ = 3;
+        } else if (kp_channels >= 10) {
+            // 5 keypoints * 2 (x, y only, no visibility)
+            has_keypoints_ = true;
+            kp_stride_ = 2;
+        } else {
+            has_keypoints_ = false;
+            kp_stride_ = 0;
+        }
+
+        ROS_INFO("Face detector output: %d channels x %d detections (keypoints: %s, stride: %d)",
+                 num_outputs_, NUM_DETECTIONS, has_keypoints_ ? "yes" : "no", kp_stride_);
+
         input_host_.resize(3 * INPUT_H * INPUT_W);
-        output_host_.resize(5 * NUM_DETECTIONS);
+        output_host_.resize(num_outputs_ * NUM_DETECTIONS);
 
         cudaMalloc(&buffers_[0], input_host_.size() * sizeof(float));
         cudaMalloc(&buffers_[1], output_host_.size() * sizeof(float));
@@ -141,6 +172,72 @@ private:
             box.y2 = std::max(0, std::min(orig_h - 1, (int)y2));
             box.confidence = conf;
 
+            // Extract keypoints if model provides them
+            box.has_keypoints = has_keypoints_;
+            if (has_keypoints_) {
+                // Read raw keypoint values first
+                float raw_kps[5][3];
+                for (int k = 0; k < 5; k++) {
+                    int base = 5 + k * kp_stride_;
+                    raw_kps[k][0] = output_host_[(base + 0) * NUM_DETECTIONS + i];
+                    raw_kps[k][1] = output_host_[(base + 1) * NUM_DETECTIONS + i];
+                    raw_kps[k][2] = (kp_stride_ >= 3)
+                        ? output_host_[(base + 2) * NUM_DETECTIONS + i]
+                        : 1.0f;
+                }
+
+                // Auto-detect coordinate format on first detection
+                static int kp_format = -1;  // -1=unknown, 0=letterbox, 1=normalized, 2=original
+                if (kp_format < 0) {
+                    float avg_kx = 0, avg_ky = 0;
+                    for (int k = 0; k < 5; k++) {
+                        avg_kx += raw_kps[k][0];
+                        avg_ky += raw_kps[k][1];
+                    }
+                    avg_kx /= 5; avg_ky /= 5;
+
+                    if (avg_kx <= 1.5f && avg_ky <= 1.5f) {
+                        kp_format = 1;  // normalized [0,1]
+                        ROS_INFO("Face keypoints: NORMALIZED format (avg raw: %.3f, %.3f)", avg_kx, avg_ky);
+                    } else if (avg_kx > INPUT_W || avg_ky > INPUT_H) {
+                        kp_format = 2;  // already in original image coords
+                        ROS_INFO("Face keypoints: ORIGINAL coords format (avg raw: %.1f, %.1f)", avg_kx, avg_ky);
+                    } else {
+                        kp_format = 0;  // letterbox 640x640 coords (same as bbox)
+                        ROS_INFO("Face keypoints: LETTERBOX coords format (avg raw: %.1f, %.1f)", avg_kx, avg_ky);
+                    }
+
+                    ROS_INFO("Face bbox=[%d,%d,%d,%d] scale=%.3f pad=(%d,%d) orig=(%dx%d)",
+                             box.x1, box.y1, box.x2, box.y2, scale_, pad_x_, pad_y_, orig_w, orig_h);
+                    for (int k = 0; k < 5; k++) {
+                        ROS_INFO("  kp[%d] raw: (%.2f, %.2f, %.2f)", k,
+                                 raw_kps[k][0], raw_kps[k][1], raw_kps[k][2]);
+                    }
+                }
+
+                // Apply appropriate transform based on detected format
+                for (int k = 0; k < 5; k++) {
+                    float kx = raw_kps[k][0];
+                    float ky = raw_kps[k][1];
+
+                    switch (kp_format) {
+                        case 0:  // letterbox coords → remove pad, unscale
+                            box.keypoints[k].x = (kx - pad_x_) / scale_;
+                            box.keypoints[k].y = (ky - pad_y_) / scale_;
+                            break;
+                        case 1:  // normalized [0,1] → multiply by original size
+                            box.keypoints[k].x = kx * orig_w;
+                            box.keypoints[k].y = ky * orig_h;
+                            break;
+                        case 2:  // already original coords
+                            box.keypoints[k].x = kx;
+                            box.keypoints[k].y = ky;
+                            break;
+                    }
+                    box.keypoints[k].vis = raw_kps[k][2];
+                }
+            }
+
             if (box.x2 - box.x1 > 10 && box.y2 - box.y1 > 10)
                 boxes.push_back(box);
         }
@@ -176,6 +273,9 @@ private:
 
     float conf_thresh_, nms_thresh_, scale_;
     int pad_x_, pad_y_;
+    int num_outputs_ = 5;
+    int kp_stride_ = 0;
+    bool has_keypoints_ = false;
     std::unique_ptr<nvinfer1::IRuntime> runtime_;
     std::unique_ptr<nvinfer1::ICudaEngine> engine_;
     std::unique_ptr<nvinfer1::IExecutionContext> context_;
@@ -415,16 +515,59 @@ void image_callback(const sensor_msgs::Image::SharedPtr msg) {
                 frames_looking_away = 0;
             }
 
-            // Draw visualization
+            // Draw face bounding box
             cv::rectangle(output, roi, cv::Scalar(255, 0, 0), 2);
-            cv::Point center((x1 + x2) / 2, (y1 + y2) / 2);
-            int arrow_len = (x2 - x1) / 2 + 30;
-            drawGaze(output, center, pitch, yaw, arrow_len);
 
-            // Display angles
+            // Determine gaze origin: use eye keypoints if they're within the face, else estimate
+            cv::Point eye_center;
+            bool eyes_valid = false;
+            if (main_face.has_keypoints) {
+                float ex = (main_face.keypoints[0].x + main_face.keypoints[1].x) / 2;
+                float ey = (main_face.keypoints[0].y + main_face.keypoints[1].y) / 2;
+                // Verify the midpoint is actually inside the face box
+                if (ex >= main_face.x1 && ex <= main_face.x2 &&
+                    ey >= main_face.y1 && ey <= main_face.y2) {
+                    eye_center = cv::Point((int)ex, (int)ey);
+                    eyes_valid = true;
+                }
+            }
+            if (!eyes_valid) {
+                eye_center.x = (x1 + x2) / 2;
+                eye_center.y = y1 + (y2 - y1) * 35 / 100;
+            }
+
+            int arrow_len = (x2 - x1) / 2 + 30;
+            drawGaze(output, eye_center, pitch, yaw, arrow_len);
+
+            // Draw facial keypoints if available and within face region
+            if (main_face.has_keypoints) {
+                cv::Scalar kp_colors[5] = {
+                    {0, 255, 0}, {0, 255, 0}, {255, 200, 0}, {0, 128, 255}, {0, 128, 255}
+                };
+                // Allow some margin beyond the face box for keypoints
+                int margin = (main_face.x2 - main_face.x1) / 4;
+                int kp_x1 = main_face.x1 - margin;
+                int kp_y1 = main_face.y1 - margin;
+                int kp_x2 = main_face.x2 + margin;
+                int kp_y2 = main_face.y2 + margin;
+
+                for (int k = 0; k < 5; k++) {
+                    float kx = main_face.keypoints[k].x;
+                    float ky = main_face.keypoints[k].y;
+                    // Only draw if within the face region
+                    if (kx >= kp_x1 && kx <= kp_x2 && ky >= kp_y1 && ky <= kp_y2) {
+                        cv::circle(output, cv::Point((int)kx, (int)ky), 3,
+                                   kp_colors[k], -1, cv::LINE_AA);
+                    }
+                }
+            }
+
+            // Display angles above face box
             char text[64];
             snprintf(text, sizeof(text), "P:%.0f Y:%.0f", pitch * 180 / M_PI, yaw * 180 / M_PI);
-            cv::putText(output, text, cv::Point(x1, y2 + 20),
+            int text_y = y1 - 10;
+            if (text_y < 15) text_y = y2 + 18;
+            cv::putText(output, text, cv::Point(x1, text_y),
                         cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 1);
         }
     }

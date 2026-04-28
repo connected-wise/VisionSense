@@ -138,6 +138,21 @@ def generate_launch_description():
 	)
 	ld.add_action(stereo_depth_node)
 
+	# Bird's Eye View mapping
+	bev_node = Node(
+		package="visionconnect",
+		name="bev",
+		executable="bev",
+		output="screen",
+		parameters=[config["bev"]["ros__parameters"]],
+		remappings=[
+			("/bev/detect_in", "/detect/detections"),
+			("/bev/lanes_in", "/lanedet/lanes"),
+			("/bev/adas_in", "/adas/adas_alerts")
+		]
+	)
+	ld.add_action(bev_node)
+
 	# dashboard
 	dashboard_node = Node(
 		package="visionconnect",
@@ -161,6 +176,7 @@ def generate_launch_description():
 		executable="gui",
 		output="screen",
 		additional_env={"DISPLAY": ":0"},
+		parameters=[config["gui"]["ros__parameters"]],
 		remappings=[
 			("/gui/image_in", "/camera_stereo/right/image_raw"),
 			("/gui/detect_in", "/detect/detections"),

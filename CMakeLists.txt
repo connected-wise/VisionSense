@@ -48,6 +48,10 @@ link_directories(/opt/nvidia/vpi2/lib64)
 cuda_add_library(stereo_rotate_cuda STATIC src/cuda/stereo_rotate.cu)
 set_target_properties(stereo_rotate_cuda PROPERTIES CUDA_ARCHITECTURES "87")
 
+# CUDA preprocessing kernel for Fast-FoundationStereo stereo_depth node
+cuda_add_library(stereo_preproc_cuda STATIC src/cuda/stereo_preproc.cu)
+set_target_properties(stereo_preproc_cuda PROPERTIES CUDA_ARCHITECTURES "87")
+
 # Shared library
 file(GLOB_RECURSE common_src RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} src/common/*.cpp)
 include_directories(src/common/include)
@@ -72,6 +76,7 @@ add_executable(gui src/node_gui.cpp ${common_src})
 add_executable(adas src/node_adas.cpp ${common_src})
 add_executable(driver_monitor src/node_driver_monitor.cpp ${common_src})
 add_executable(imu_gps src/node_imu_gps.cpp ${common_src})
+add_executable(bev src/node_bev.cpp ${common_src})
 add_executable(stereo_depth src/node_stereo_depth.cpp)
 
 # 'include' directories
@@ -162,6 +167,14 @@ target_link_libraries(driver_monitor
     cudart
 )
 
+target_link_libraries(bev
+    ${catkin_LIBRARIES}
+    ${OpenCV_LIBRARIES}
+    ${TENSORRT_LIBS}
+    jetson-inference
+    common
+)
+
 target_link_libraries(imu_gps
     ${catkin_LIBRARIES}
     common
@@ -175,6 +188,8 @@ target_link_libraries(stereo_depth
     ${OpenCV_LIBRARIES}
     nvinfer
     cudart
+    dl
+    stereo_preproc_cuda
 )
 
 # Include custom messages
@@ -197,6 +212,7 @@ rosidl_target_interfaces(camera_stereo ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(dashboard ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(gui ${PROJECT_NAME} "rosidl_typesupport_cpp")
 rosidl_target_interfaces(adas ${PROJECT_NAME} "rosidl_typesupport_cpp")
+rosidl_target_interfaces(bev ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 ament_export_dependencies(rosidl_default_runtime)
 
@@ -273,6 +289,15 @@ ament_target_dependencies(adas
     std_msgs
 )
 
+ament_target_dependencies(bev
+    ament_index_cpp
+    rclcpp
+    sensor_msgs
+    geometry_msgs
+    vision_msgs
+    std_msgs
+)
+
  ament_target_dependencies(driver_monitor
     ament_index_cpp
     rclcpp
@@ -306,6 +331,7 @@ install(TARGETS preview DESTINATION lib/${PROJECT_NAME})
 install(TARGETS dashboard DESTINATION lib/${PROJECT_NAME})
 install(TARGETS gui DESTINATION lib/${PROJECT_NAME})
 install(TARGETS adas DESTINATION lib/${PROJECT_NAME})
+install(TARGETS bev DESTINATION lib/${PROJECT_NAME})
 install(TARGETS driver_monitor DESTINATION lib/${PROJECT_NAME})
 install(TARGETS imu_gps DESTINATION lib/${PROJECT_NAME})
 install(TARGETS stereo_depth DESTINATION lib/${PROJECT_NAME})
