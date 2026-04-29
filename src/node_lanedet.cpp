@@ -4,7 +4,6 @@
 #include "common.h"
 #include "trtutil.h"
 
-#include <opencv2/cudaimgproc.hpp>
 #include <opencv2/opencv.hpp>
 #include "visionconnect/msg/lanes.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -104,35 +103,27 @@ std::vector<std::vector<std::pair<int, int>>> GetLines(const std::vector<cv::Mat
 
 std::vector<std::vector<float>> run_engine(cv::Mat img, const std::string& encoding)
 {
+    // ROI view of the bottom half of the frame; cudaMemcpy2D in the engine
+    // uses img.step so the non-contiguous stride is handled correctly.
+    cv::Mat cropped = img(cv::Rect(0, img.rows / 2, img.cols, CROP));
+
     const auto &inputDims = engine->getInputDims();
-    std::vector<std::vector<cv::cuda::GpuMat>> inputs;
-
-    for (const auto &inputDim : inputDims)
-    { // For each of the model inputs...
-        std::vector<cv::cuda::GpuMat> input;
-        for (size_t j = 0; j < BATCH_SIZE; ++j)
-        { // For each element we want to add to the batch...
-            cv::cuda::GpuMat gpu_img, resized;
-            gpu_img.upload(img);
-            // cv::Rect(x, y, width, height) where x, y is the top left corner
-            cv::cuda::GpuMat cropped(gpu_img, cv::Rect(0, img.rows/2, img.cols, CROP));
-            // Only convert BGR->RGB if input is BGR (skip if already RGB for better performance)
-            if (encoding == "bgr8") {
-                cv::cuda::cvtColor(cropped, cropped, cv::COLOR_BGR2RGB);
-            }
-            cv::cuda::resize(cropped, resized, cv::Size(inputDim.d[2], inputDim.d[1]));
-
-            input.emplace_back(std::move(resized));
-        }
+    std::vector<std::vector<cv::Mat>> inputs;
+    inputs.reserve(inputDims.size());
+    for (size_t k = 0; k < inputDims.size(); ++k) {
+        std::vector<cv::Mat> input(BATCH_SIZE, cropped);
         inputs.emplace_back(std::move(input));
     }
 
-    std::vector<std::vector<std::vector<float>>> featureVectors; // Considers a batch output
+    std::vector<std::vector<std::vector<float>>> featureVectors;
     std::array<float, 3> subVals{125.f, 125.f, 125.f};
     std::array<float, 3> divVals{1.0f, 1.0f, 1.0f};
-    bool normalize = false;
 
-    bool success = engine->runInference(inputs, featureVectors, subVals, divVals, normalize);
+    bool success = engine->runInference(inputs, featureVectors,
+                                        subVals, divVals,
+                                        /*normalize=*/false,
+                                        /*swap_rb=*/(encoding == "bgr8"),
+                                        /*aspect_ratio_pad=*/false);
     if (!success)
     {
         throw std::runtime_error("Unable to run inference.");

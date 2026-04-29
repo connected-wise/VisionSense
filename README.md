@@ -153,7 +153,7 @@ Computes dense depth maps using the Fast-FoundationStereo model with a custom Te
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `engine` | string | `stereo-depth/stereo_plugin.engine` | TensorRT engine path |
+| `engine` | string | `stereo-depth/stereo_plugin_320_iters4.engine` | TensorRT engine path |
 | `plugin` | string | `stereo-depth/libgwc_plugin.so` | GWC plugin shared library (must be loaded before engine deserialisation) |
 | `max_disparity` | float | 192.0 | Maximum disparity (must match the value baked into the engine) |
 | `warmup_iterations` | int | 5 | Model warmup runs |
@@ -166,10 +166,12 @@ Computes dense depth maps using the Fast-FoundationStereo model with a custom Te
 - `/stereo_depth/disparity` (`sensor_msgs/Image`) - Normalized disparity (mono8, 0-255)
 
 **Model Specifications:**
-- Input: 480×480 RGB stereo pair (CUDA HWC `uint8` BGR → CHW `float32` RGB preprocessing in `src/cuda/stereo_preproc.cu`; mean/std normalisation baked into the engine)
-- Output: Dense disparity map `[1, 1, 480, 480]` float32, upsampled by spatial-attention head
-- Architecture: EdgeNeXt feature backbone + GWC volume (custom CUDA plugin) + 3D hourglass + GRU refinement (8 iterations)
-- Engine generation: see `src/graphs/stereo-depth/README.md` for the ONNX → TensorRT build flow on a fresh Jetson
+- Input: 320×320 RGB stereo pair (CUDA HWC `uint8` BGR → CHW `float32` RGB preprocessing in `src/cuda/stereo_preproc.cu`; mean/std normalisation baked into the engine)
+- Output: Dense disparity map `[1, 1, 320, 320]` float32, upsampled by spatial-attention head
+- Architecture: EdgeNeXt feature backbone + GWC volume (custom CUDA plugin) + 3D hourglass + GRU refinement (4 iterations)
+- Checkpoint: lighter `20-30-48` variant of Fast-FoundationStereo (~15% faster on the hourglass than `23-36-37`)
+- Measured on Orin NX 16GB MAXN_SUPER + `jetson_clocks`: **~49 ms / ~20 fps** (vs ~206 ms / ~5 fps for the original 480×480/iters=8/heavy-checkpoint export)
+- Engine generation: run `scripts/regenerate_engines.sh` from the repo root to rebuild every TRT engine (including the FFS one) on a fresh Jetson; see `src/graphs/stereo-depth/README.md` for re-exporting the ONNX from PyTorch with different speed/accuracy tradeoffs
 
 ---
 
@@ -373,20 +375,7 @@ git clone https://github.com/connected-wise/VisionSense.git
 cd VisionSense
 ```
 
-### Step 2: Install OpenCV with CUDA Support
-
-Build OpenCV from source with CUDA acceleration (required for Jetson):
-
-```bash
-sudo bash install_opencv_cuda_orin.sh
-```
-
-> **Note:** This process takes 2-3 hours. The script will:
-> - Install all OpenCV build dependencies
-> - Download and compile the latest OpenCV with CUDA 12.6 support
-> - Configure for Jetson Orin (compute capability 8.7)
-
-### Step 3: Install ROS2 and Project Dependencies
+### Step 2: Install ROS2 and Project Dependencies
 
 Install ROS2 Humble, jetson-inference, and all required libraries:
 
@@ -400,6 +389,29 @@ This script installs:
 - jetson-inference library
 - Python dependencies (numpy, pyserial)
 - System libraries (Eigen3, Qt5, V4L utilities)
+- The system OpenCV (`libopencv-dev`, ~4.8 from JetPack) — no source build required.
+
+> The CUDA preprocessing kernels in `src/cuda/preprocess.cu` and
+> `src/cuda/stereo_preproc.cu` replace the OpenCV `cv::cuda::*` ops that
+> earlier branches relied on, so an OpenCV-with-CUDA source build is no
+> longer needed.
+
+### Step 3: Regenerate TensorRT Engines
+
+The `.engine` files checked into the repo were built on a different Jetson
+and TensorRT version. **They will not load on your device until rebuilt:**
+
+```bash
+bash scripts/regenerate_engines.sh
+```
+
+This rebuilds every engine (5 detection/classification/face/gaze + the
+Fast-FoundationStereo one) from its ONNX source. Total wall time on Orin NX
+16GB MAXN_SUPER + `jetson_clocks` is ~20 minutes; the FFS engine alone takes
+~10 minutes due to `--builderOptimizationLevel=5`.
+
+If a build fails the script keeps the previous engine renamed as
+`<name>.prev.<TIMESTAMP>`, so a partial run never leaves you broken.
 
 ### Step 4: Build VisionSense
 

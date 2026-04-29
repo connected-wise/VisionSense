@@ -4,7 +4,6 @@
 #include "common.h"
 #include "trtutil.h"
 
-#include <opencv2/cudaimgproc.hpp>
 #include <opencv2/opencv.hpp>
 
 #include "visionconnect/msg/detect.hpp"
@@ -64,34 +63,22 @@ void postprocess(std::vector<std::vector<std::vector<float>>> &featureVectors, s
 
 std::vector<std::vector<std::vector<float>>> run_engine(std::vector<cv::Mat> images)
 {
-
-    int batch_size = images.size();
-
     const auto &inputDims = engine->getInputDims();
-    std::vector<std::vector<cv::cuda::GpuMat>> inputs;
-
-    for (const auto &inputDim : inputDims)
-    { // For each of the model inputs...
-        std::vector<cv::cuda::GpuMat> input;
-        for (size_t j = 0; j < static_cast<size_t>(batch_size); ++j)
-        { // For each element we want to add to the batch...
-            cv::cuda::GpuMat gpu_img, resized;
-            gpu_img.upload(images[j]);
-            // Apply if input is BGR image:
-            cv::cuda::cvtColor(gpu_img, gpu_img, cv::COLOR_BGR2RGB);
-            //cv::cuda::resize(gpu_img, resized, cv::Size(inputDim.d[2], inputDim.d[1]));
-            resized = engine->resizeKeepAspectRatioPadRightBottom(gpu_img, inputDim.d[2], inputDim.d[1], cv::COLOR_BGR2RGB); // TRT dims are (height, width) whereas OpenCV is (width, height)
-            input.emplace_back(std::move(resized));
-        }
-        inputs.emplace_back(std::move(input));
+    std::vector<std::vector<cv::Mat>> inputs;
+    inputs.reserve(inputDims.size());
+    for (size_t k = 0; k < inputDims.size(); ++k) {
+        inputs.emplace_back(images);
     }
 
-    std::vector<std::vector<std::vector<float>>> featureVectors; // Considers a batch output
+    std::vector<std::vector<std::vector<float>>> featureVectors;
     std::array<float, 3> subVals{0.f, 0.f, 0.f};
     std::array<float, 3> divVals{1.f, 1.f, 1.f};
-    bool normalize = true;
 
-    bool success = engine->runInference(inputs, featureVectors, subVals, divVals, normalize);
+    bool success = engine->runInference(inputs, featureVectors,
+                                        subVals, divVals,
+                                        /*normalize=*/true,
+                                        /*swap_rb=*/true,
+                                        /*aspect_ratio_pad=*/true);
     if (!success)
     {
         throw std::runtime_error("Unable to run inference.");

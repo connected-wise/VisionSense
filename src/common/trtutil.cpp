@@ -2,6 +2,7 @@
 #include <fstream>
 
 #include "trtutil.h"
+#include "preprocess.h"
 #include "NvOnnxParser.h"
 
 using namespace nvinfer1;
@@ -166,6 +167,12 @@ Engine::~Engine() {
     }
 
     m_buffers.clear();
+
+    if (m_uploadBuffer) {
+        cudaFree(m_uploadBuffer);
+        m_uploadBuffer = nullptr;
+        m_uploadBufferBytes = 0;
+    }
 }
 
 bool Engine::loadNetwork(std::string trtModelPath) {
@@ -262,9 +269,11 @@ void Engine::checkCudaErrorCode(cudaError_t code) {
     }
 }
 
-bool Engine::runInference(const std::vector<std::vector<cv::cuda::GpuMat>> &inputs, std::vector<std::vector<std::vector<float>>>& featureVectors,
-                          const std::array<float, 3>& subVals, const std::array<float, 3>& divVals, bool normalize) {
-    // First we do some error checking
+bool Engine::runInference(const std::vector<std::vector<cv::Mat>> &inputs,
+                          std::vector<std::vector<std::vector<float>>>& featureVectors,
+                          const std::array<float, 3>& subVals,
+                          const std::array<float, 3>& divVals,
+                          bool normalize, bool swap_rb, bool aspect_ratio_pad) {
     if (inputs.empty() || inputs[0].empty()) {
         std::cout << "===== Error =====" << std::endl;
         std::cout << "Provided input vector is empty!" << std::endl;
@@ -278,7 +287,6 @@ bool Engine::runInference(const std::vector<std::vector<cv::cuda::GpuMat>> &inpu
         return false;
     }
 
-    // Ensure the batch size does not exceed the max
     if (inputs[0].size() > static_cast<size_t>(m_options.maxBatchSize)) {
         std::cout << "===== Error =====" << std::endl;
         std::cout << "The batch size is larger than the model expects!" << std::endl;
@@ -288,7 +296,6 @@ bool Engine::runInference(const std::vector<std::vector<cv::cuda::GpuMat>> &inpu
     }
 
     const auto batchSize = static_cast<int32_t>(inputs[0].size());
-    // Make sure the same batch size was provided for all inputs
     for (size_t i = 1; i < inputs.size(); ++i) {
         if (inputs[i].size() != static_cast<size_t>(batchSize)) {
             std::cout << "===== Error =====" << std::endl;
@@ -297,107 +304,102 @@ bool Engine::runInference(const std::vector<std::vector<cv::cuda::GpuMat>> &inpu
         }
     }
 
-    // Create the cuda stream that will be used for inference
     cudaStream_t inferenceCudaStream;
     checkCudaErrorCode(cudaStreamCreate(&inferenceCudaStream));
 
-    // Preprocess all the inputs
     for (size_t i = 0; i < numInputs; ++i) {
         const auto& batchInput = inputs[i];
         const auto& dims = m_inputDims[i];
+        const int channels = dims.d[0];
+        const int dst_h = dims.d[1];
+        const int dst_w = dims.d[2];
 
-        auto &input = batchInput[0];
-        if (input.channels() != dims.d[0] ||
-            input.rows != dims.d[1] ||
-            input.cols != dims.d[2]) {
+        if (channels != 3) {
             std::cout << "===== Error =====" << std::endl;
-            std::cout << "Input does not have correct size!" << std::endl;
-            std::cout << "Expected: (" << dims.d[0] << ", " << dims.d[1] << ", "
-                      << dims.d[2] << ")" << std::endl;
-            std::cout << "Got: (" << input.channels() << ", " << input.rows << ", " << input.cols << ")" << std::endl;
-            std::cout << "Ensure you resize your input image to the correct size" << std::endl;
+            std::cout << "Only 3-channel inputs are supported (got " << channels << ")" << std::endl;
+            cudaStreamDestroy(inferenceCudaStream);
             return false;
         }
 
-        nvinfer1::Dims4 inputDims = {batchSize, dims.d[0], dims.d[1], dims.d[2]};
-        m_context->setInputShape(m_IOTensorNames[i].c_str(), inputDims); // Define the batch size
+        nvinfer1::Dims4 inputDims = {batchSize, channels, dst_h, dst_w};
+        m_context->setInputShape(m_IOTensorNames[i].c_str(), inputDims);
 
-        // Copy over the input data and perform the preprocessing
-        cv::cuda::GpuMat gpu_dst(1, batchInput[0].rows * batchInput[0].cols * batchSize, CV_8UC3);
+        float* dst_base = static_cast<float*>(m_buffers[i]);
+        const size_t per_image_floats = static_cast<size_t>(channels) * dst_h * dst_w;
 
-        // OpenCV reads images into memory in NHWC format, while TensorRT expects images in NCHW format. 
-        // The following code converts NHWC to NCHW.
-        // Even though TensorRT expects NCHW at IO, during optimization, it can internally use NHWC to optimize cuda kernels
-        // See: https://docs.nvidia.com/deeplearning/tensorrt/developer-guide/index.html#data-layout
-        size_t width = batchInput[0].cols * batchInput[0].rows;
-        for (size_t img = 0; img < batchInput.size(); img++) {
-            std::vector<cv::cuda::GpuMat> input_channels{
-                    cv::cuda::GpuMat(batchInput[0].rows, batchInput[0].cols, CV_8U, &(gpu_dst.ptr()[0 + width * 3 * img])),
-                    cv::cuda::GpuMat(batchInput[0].rows, batchInput[0].cols, CV_8U, &(gpu_dst.ptr()[width + width * 3 * img])),
-                    cv::cuda::GpuMat(batchInput[0].rows, batchInput[0].cols, CV_8U,
-                                     &(gpu_dst.ptr()[width * 2 + width * 3 * img]))
-            };
-            cv::cuda::split(batchInput[img], input_channels);  // HWC -> CHW
+        for (int b = 0; b < batchSize; ++b) {
+            const cv::Mat& img = batchInput[b];
+            if (img.empty() || img.type() != CV_8UC3) {
+                std::cout << "===== Error =====" << std::endl;
+                std::cout << "Each input must be a non-empty CV_8UC3 cv::Mat" << std::endl;
+                cudaStreamDestroy(inferenceCudaStream);
+                return false;
+            }
+
+            const int src_w = img.cols;
+            const int src_h = img.rows;
+            const size_t row_bytes = static_cast<size_t>(src_w) * 3;
+            const size_t needed = row_bytes * src_h;
+
+            if (needed > m_uploadBufferBytes) {
+                if (m_uploadBuffer) {
+                    checkCudaErrorCode(cudaFree(m_uploadBuffer));
+                    m_uploadBuffer = nullptr;
+                }
+                checkCudaErrorCode(cudaMalloc(&m_uploadBuffer, needed));
+                m_uploadBufferBytes = needed;
+            }
+
+            // cudaMemcpy2DAsync handles non-contiguous cv::Mat (e.g. ROI views) via img.step.
+            checkCudaErrorCode(cudaMemcpy2DAsync(
+                m_uploadBuffer, row_bytes,
+                img.data, img.step,
+                row_bytes, src_h,
+                cudaMemcpyHostToDevice, inferenceCudaStream));
+
+            launchPreprocess(
+                static_cast<const uint8_t*>(m_uploadBuffer),
+                src_w, src_h, row_bytes,
+                dst_base + b * per_image_floats,
+                dst_w, dst_h,
+                swap_rb, aspect_ratio_pad, normalize,
+                subVals[0], subVals[1], subVals[2],
+                divVals[0], divVals[1], divVals[2],
+                inferenceCudaStream);
         }
-
-        cv::cuda::GpuMat mfloat;
-        if (normalize) {
-            // [0.f, 1.f]
-            gpu_dst.convertTo(mfloat, CV_32FC3, 1.f / 255.f);
-        } else {
-            // [0.f, 255.f]
-            gpu_dst.convertTo(mfloat, CV_32FC3);
-        }
-
-        // Apply normalizations
-        cv::cuda::subtract(mfloat, cv::Scalar(subVals[0], subVals[1], subVals[2]), mfloat, cv::noArray(), -1);
-        cv::cuda::divide(mfloat, cv::Scalar(divVals[0], divVals[1], divVals[2]), mfloat, 1, -1);
-
-        auto *dataPointer = mfloat.ptr<void>();
-
-        checkCudaErrorCode(cudaMemcpyAsync(m_buffers[i], dataPointer,
-                                           mfloat.cols * mfloat.rows * mfloat.channels() * sizeof(float),
-                                           cudaMemcpyDeviceToDevice, inferenceCudaStream));
     }
 
-    // Ensure all dynamic bindings have been defined.
-    //if (!m_context->allInputDimensionsSpecified()) {
-    //    throw std::runtime_error("Error, not all required dimensions specified.");
-    //}
-
-    // Set the address of the input and output buffers
     for (size_t i = 0; i < m_buffers.size(); ++i) {
         bool status = m_context->setTensorAddress(m_IOTensorNames[i].c_str(), m_buffers[i]);
         if (!status) {
+            cudaStreamDestroy(inferenceCudaStream);
             return false;
         }
     }
 
-    // Run inference.
     bool status = m_context->enqueueV3(inferenceCudaStream);
     if (!status) {
+        cudaStreamDestroy(inferenceCudaStream);
         return false;
     }
 
-    // Copy the outputs back to CPU
     featureVectors.clear();
 
     for (int batch = 0; batch < batchSize; ++batch) {
-        // Batch
         std::vector<std::vector<float>> batchOutputs{};
         for (int32_t outputBinding = numInputs; outputBinding < m_engine->getNbIOTensors(); ++outputBinding) {
-            // We start at index m_inputDims.size() to account for the inputs in our m_buffers
             std::vector<float> output;
             auto outputLenFloat = m_outputLengthsFloat[outputBinding - numInputs];
             output.resize(outputLenFloat);
-            // Copy the output
-            checkCudaErrorCode(cudaMemcpyAsync(output.data(), static_cast<char*>(m_buffers[outputBinding]) + (batch * sizeof(float) * outputLenFloat), outputLenFloat * sizeof(float), cudaMemcpyDeviceToHost, inferenceCudaStream));
+            checkCudaErrorCode(cudaMemcpyAsync(output.data(),
+                                               static_cast<char*>(m_buffers[outputBinding]) + (batch * sizeof(float) * outputLenFloat),
+                                               outputLenFloat * sizeof(float),
+                                               cudaMemcpyDeviceToHost, inferenceCudaStream));
             batchOutputs.emplace_back(std::move(output));
         }
         featureVectors.emplace_back(std::move(batchOutputs));
     }
 
-    // Synchronize the cuda stream
     checkCudaErrorCode(cudaStreamSynchronize(inferenceCudaStream));
     checkCudaErrorCode(cudaStreamDestroy(inferenceCudaStream));
     return true;
@@ -444,17 +446,6 @@ void Engine::getDeviceNames(std::vector<std::string>& deviceNames) {
 
         deviceNames.push_back(std::string(prop.name));
     }
-}
-
-cv::cuda::GpuMat Engine::resizeKeepAspectRatioPadRightBottom(const cv::cuda::GpuMat &input, size_t height, size_t width, const cv::Scalar &bgcolor) {
-    float r = std::min(width / (input.cols * 1.0), height / (input.rows * 1.0));
-    int unpad_w = r * input.cols;
-    int unpad_h = r * input.rows;
-    cv::cuda::GpuMat re(unpad_h, unpad_w, CV_8UC3);
-    cv::cuda::resize(input, re, re.size());
-    cv::cuda::GpuMat out(height, width, CV_8UC3, bgcolor);
-    re.copyTo(out(cv::Rect(0, 0, re.cols, re.rows)));
-    return out;
 }
 
 void Engine::transformOutput(std::vector<std::vector<std::vector<float>>>& input, std::vector<std::vector<float>>& output) {

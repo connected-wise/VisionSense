@@ -25,7 +25,7 @@ camera_stereo:
 stereo_depth:
     ros__parameters:
         # Fast-FoundationStereo (single TRT engine + GWC CUDA plugin)
-        engine:                 "stereo-depth/stereo_plugin.engine"
+        engine:                 "stereo-depth/stereo_plugin_320_iters4.engine"
         plugin:                 "stereo-depth/libgwc_plugin.so"
         max_disparity:          192.0   # Must match the value baked into the engine
         warmup_iterations:      5

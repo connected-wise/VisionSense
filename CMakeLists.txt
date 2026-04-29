@@ -43,6 +43,7 @@ find_package(X11 REQUIRED)
 
 link_directories(/usr/lib/aarch64-linux-gnu/tegra)
 link_directories(/opt/nvidia/vpi2/lib64)
+link_directories(/usr/local/cuda/lib64)
 
 # CUDA library for stereo rotation kernel
 cuda_add_library(stereo_rotate_cuda STATIC src/cuda/stereo_rotate.cu)
@@ -52,11 +53,16 @@ set_target_properties(stereo_rotate_cuda PROPERTIES CUDA_ARCHITECTURES "87")
 cuda_add_library(stereo_preproc_cuda STATIC src/cuda/stereo_preproc.cu)
 set_target_properties(stereo_preproc_cuda PROPERTIES CUDA_ARCHITECTURES "87")
 
+# CUDA library for fused TRT-input preprocessing (replaces OpenCV CUDA ops)
+cuda_add_library(preprocess_cuda STATIC src/cuda/preprocess.cu)
+target_include_directories(preprocess_cuda PUBLIC src/common/include)
+set_target_properties(preprocess_cuda PROPERTIES CUDA_ARCHITECTURES "87")
+
 # Shared library
 file(GLOB_RECURSE common_src RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} src/common/*.cpp)
 include_directories(src/common/include)
 add_library(common STATIC ${common_src})
-target_link_libraries(common ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} jetson-inference cudart)
+target_link_libraries(common ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} jetson-inference cudart preprocess_cuda)
 
 # TensorRT related files
 set(TENSORRT_LIBS jetson-inference nvinfer cudart)

@@ -1,10 +1,16 @@
 #pragma once
 
 #include <chrono>
-#include <opencv2/opencv.hpp>
-#include <opencv2/core/cuda.hpp>
-#include <opencv2/cudawarping.hpp>
-#include <opencv2/cudaarithm.hpp>
+#include <atomic>
+#include <memory>
+#include <vector>
+#include <array>
+#include <string>
+#include <cstdint>
+
+#include <opencv2/core.hpp>
+#include <cuda_runtime.h>
+
 #include "NvInfer.h"
 
 // Utility Timer
@@ -45,7 +51,6 @@ struct Options {
     int deviceIndex = 0;
 };
 
-#pragma once
  //Class to extend TensorRT logger
 class TRTLogger : public nvinfer1::ILogger {
     void log (Severity severity, const char* msg) noexcept override;
@@ -59,16 +64,24 @@ public:
     bool build(std::string onnxModelPath);
     // Load and prepare the network for inference
     bool loadNetwork(std::string trtModelPath);
-    // Run inference.
-    // Input format [input][batch][cv::cuda::GpuMat]
-    // Output format [batch][output][feature_vector]
-    bool runInference(const std::vector<std::vector<cv::cuda::GpuMat>>& inputs, std::vector<std::vector<std::vector<float>>>& featureVectors, const std::array<float, 3>& subVals = {0.f, 0.f, 0.f},
-                      const std::array<float, 3>& divVals = {1.f, 1.f, 1.f}, bool normalize = true);
 
-    // Utility method for resizing an image while maintaining the aspect ratio by adding padding to smaller dimension after scaling
-    // While letterbox padding normally adds padding to top & bottom, or left & right sides, this implementation only adds padding to the right or bottom side
-    // This is done so that it's easier to convert detected coordinates (ex. YOLO model) back to the original reference frame.
-    static cv::cuda::GpuMat resizeKeepAspectRatioPadRightBottom(const cv::cuda::GpuMat& input, size_t height, size_t width, const cv::Scalar& bgcolor = cv::Scalar(0, 0, 0));
+    // Run inference.
+    //
+    // Inputs are CPU cv::Mat (CV_8UC3). The engine uploads each image to GPU,
+    // runs a fused CUDA kernel that performs bilinear resize (optionally
+    // letterbox-pads with right/bottom padding), optional BGR<->RGB channel
+    // swap, optional /255 normalization, per-channel (value-sub)/div, and
+    // HWC->CHW transpose, writing directly into the TensorRT input binding.
+    //
+    // Input format:  [input][batch] of cv::Mat (CV_8UC3, any size)
+    // Output format: [batch][output][feature_vector]
+    bool runInference(const std::vector<std::vector<cv::Mat>>& inputs,
+                      std::vector<std::vector<std::vector<float>>>& featureVectors,
+                      const std::array<float, 3>& subVals = {0.f, 0.f, 0.f},
+                      const std::array<float, 3>& divVals = {1.f, 1.f, 1.f},
+                      bool normalize = true,
+                      bool swap_rb = false,
+                      bool aspect_ratio_pad = false);
 
     const std::vector<nvinfer1::Dims3>& getInputDims() const { return m_inputDims; };
     const std::vector<nvinfer1::Dims>& getOutputDims() const { return m_outputDims ;};
@@ -94,6 +107,10 @@ private:
     std::vector<nvinfer1::Dims3> m_inputDims;
     std::vector<nvinfer1::Dims> m_outputDims;
     std::vector<std::string> m_IOTensorNames;
+
+    // Reusable device buffer for staging raw uint8 image uploads.
+    void* m_uploadBuffer = nullptr;
+    size_t m_uploadBufferBytes = 0;
 
     // Must keep IRuntime around for inference, see: https://forums.developer.nvidia.com/t/is-it-safe-to-deallocate-nvinfer1-iruntime-after-creating-an-nvinfer1-icudaengine-but-before-running-inference-with-said-icudaengine/255381/2?u=cyruspk4w6
     std::unique_ptr<nvinfer1::IRuntime> m_runtime = nullptr;
