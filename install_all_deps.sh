@@ -1,8 +1,13 @@
 #!/bin/bash
-# Comprehensive installation script for VisionConnect-Plus on JetPack 6.2
+# Comprehensive installation script for VisionSense on JetPack 6.2
 # Run with: bash install_all_deps.sh
 
 set -e  # Exit on error
+
+# Resolve the directory containing this script regardless of how it's invoked.
+# We `cd` later, so this must be captured up front and from $BASH_SOURCE
+# (which works under sourcing too) rather than $0.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "======================================"
 echo "VisionConnect-Plus Dependency Installer"
@@ -86,34 +91,21 @@ sudo apt install -y \
     gpsd \
     gpsd-clients \
     libgps-dev \
-    v4l-utils
+    v4l-utils \
+    libopencv-dev
 
-echo -e "\n7. Checking OpenCV installation..."
-# Check if OpenCV from source is installed and reinstall headers if needed
-if [ -f "/usr/lib/aarch64-linux-gnu/cmake/opencv4/OpenCVConfig.cmake" ]; then
-    OPENCV_VER=$(grep 'SET(OpenCV_VERSION ' /usr/lib/aarch64-linux-gnu/cmake/opencv4/OpenCVConfig.cmake | grep -oP '\d+\.\d+\.\d+')
-    echo "OpenCV libraries version: $OPENCV_VER"
-
-    # Check if headers match libraries (system packages may overwrite headers)
-    if [ -f "/usr/include/opencv4/opencv2/core/version.hpp" ]; then
-        HEADER_MINOR=$(grep '#define CV_VERSION_MINOR' /usr/include/opencv4/opencv2/core/version.hpp | grep -oP '\d+')
-        LIB_MINOR=$(echo $OPENCV_VER | cut -d. -f2)
-        if [ "$HEADER_MINOR" != "$LIB_MINOR" ]; then
-            echo "Warning: Header/library version mismatch detected (headers: 4.$HEADER_MINOR, libs: $OPENCV_VER)"
-            if [ -d ~/opencv/build ]; then
-                echo "Reinstalling OpenCV headers from source build..."
-                cd ~/opencv/build && sudo make install > /dev/null 2>&1
-                echo "✓ OpenCV headers reinstalled"
-            else
-                echo "Please rebuild OpenCV from source to fix header mismatch."
-            fi
-        else
-            echo "✓ OpenCV version: $OPENCV_VER (headers and libraries match)"
-        fi
-    fi
+echo -e "\n7. Verifying OpenCV..."
+# VisionSense uses the system OpenCV that ships with JetPack 6.2 (no CUDA
+# modules). The cv::cuda::* ops the older codebase relied on were replaced
+# with raw CUDA kernels in src/cuda/preprocess.cu and src/cuda/stereo_preproc.cu,
+# so an OpenCV-from-source build is no longer required.
+if [ -f "/usr/include/opencv4/opencv2/core/version.hpp" ]; then
+    OPENCV_VER=$(grep '#define CV_VERSION_' /usr/include/opencv4/opencv2/core/version.hpp \
+        | awk '{print $3}' | head -3 | paste -sd. | tr -d '"')
+    echo "✓ OpenCV $OPENCV_VER (system, libopencv-dev)"
 else
-    echo "OpenCV not found. Please run install_opencv_cuda_orin.sh first to build OpenCV with CUDA support."
-    echo "Run: bash install_opencv_cuda_orin.sh"
+    echo "✗ libopencv-dev did not install OpenCV headers — aborting"
+    exit 1
 fi
 
 echo -e "\n8. Setting up environment variables..."
@@ -152,9 +144,9 @@ GPSDCONF
     else
         echo "✓ gpsd already configured for /dev/ttyTHS1"
     fi
-    sudo systemctl enable gpsd gpsd.socket
-    sudo systemctl restart gpsd gpsd.socket
-    echo "✓ gpsd service enabled and started"
+    sudo systemctl enable gpsd gpsd.socket || echo "  (gpsd enable failed — continuing; safe if no GPS hardware)"
+    sudo systemctl restart gpsd gpsd.socket || echo "  (gpsd restart failed — continuing; safe if no GPS hardware)"
+    echo "✓ gpsd configured (service may be inactive without GPS hardware)"
 else
     echo "Warning: /etc/default/gpsd not found. gpsd may not be installed correctly."
 fi
@@ -209,8 +201,12 @@ if [ ! -d "/boot/arducam" ]; then
         cd "$ARDUCAM_TMP"
     }
     chmod +x install_full.sh
-    sudo ./install_full.sh -m arducam_4lane
-    cd "$(dirname "$0")"
+    # Arducam's installer asks "Continue?" interactively. Pipe "n" so it
+    # doesn't block; the kernel/dtb pieces it offers to swap may already be
+    # in place and skipping that prompt is the right default.
+    echo "n" | sudo ./install_full.sh -m arducam_4lane || \
+        echo "  (Arducam installer returned non-zero — may be a pre-existing kernel mismatch; check /boot/arducam manually)"
+    cd "$SCRIPT_DIR"
     rm -rf "$ARDUCAM_TMP" /tmp/MIPI_Camera
     echo "✓ Arducam drivers installed (reboot required after script completes)"
 else
@@ -218,8 +214,13 @@ else
 fi
 
 echo -e "\n14. Installing camera device tree overlay..."
-# Combined overlay for AR0234 stereo camera + IMX219 rear camera
-OVERLAY_SRC="$(dirname "$0")/overlays/tegra234-p3767-camera-p3768-arducam-imx219-combined.dts"
+# Combined overlay for AR0234 stereo camera + IMX219 rear camera.
+# Works on every Orin variant the AR0234+IMX219 combo runs on:
+#   - Orin Nano 4GB / 8GB / 8GB Super, Orin NX 8GB / 16GB
+#   - Rootfs on either SD card (/dev/mmcblk0p1) or NVMe (root=PARTUUID=...)
+# The trick is: don't hardcode root=, kernel flags, or FDT. Derive everything
+# from the primary boot entry that's already working on this machine.
+OVERLAY_SRC="${SCRIPT_DIR}/overlays/tegra234-p3767-camera-p3768-arducam-imx219-combined.dts"
 
 if [ -f "$OVERLAY_SRC" ]; then
     echo "Compiling camera overlay..."
@@ -238,17 +239,52 @@ if [ -f "$OVERLAY_SRC" ]; then
         sudo cp "$OVERLAY_TMP" "$OVERLAY_DST"
         echo "✓ Camera overlay installed to $OVERLAY_DST"
 
-        # Update extlinux.conf if ArducamIMX219 entry doesn't exist
+        # Always back up extlinux.conf before any edit. Past install runs of
+        # this script wrote entries that prevented boot — hardcoded
+        # /dev/mmcblk0p1 on NVMe-rooted systems, missing nvme.use_threaded_interrupts=1,
+        # wrong-module FDT. Cheap insurance.
+        BACKUP="/boot/extlinux/extlinux.conf.bak.$(date +%Y%m%d-%H%M%S)"
+        sudo cp /boot/extlinux/extlinux.conf "$BACKUP"
+        echo "  Backup: $BACKUP"
+
+        # Add ArducamIMX219 entry if it doesn't exist
         if ! grep -q "ArducamIMX219" /boot/extlinux/extlinux.conf; then
             echo "Adding boot entry for combined camera overlay..."
 
-            # Determine kernel and FDT paths
+            # Inherit the APPEND line from the "primary" entry verbatim. This
+            # is what makes the script work on both SD-rooted and NVMe-rooted
+            # devices: primary's APPEND already contains the right root= for
+            # this filesystem (root=/dev/mmcblk0p1 on SD, root=PARTUUID=... on
+            # NVMe) and the right kernel flags (NVMe-rooted boards also need
+            # nvme.use_threaded_interrupts=1 + nv-auto-config to init reliably).
+            # Hand-rolling these per-board is how installs break.
+            PRIMARY_APPEND=$(awk '
+                /^LABEL primary/ { in_primary=1; next }
+                /^LABEL / { in_primary=0 }
+                in_primary && /^[[:space:]]*APPEND/ {
+                    sub(/^[[:space:]]*APPEND[[:space:]]*/, "")
+                    print
+                    exit
+                }' /boot/extlinux/extlinux.conf)
+
+            # FDT is intentionally NOT set: we rely on the bootloader's
+            # EEPROM-based DTB auto-detection so the entry works on NX 16GB,
+            # NX 8GB, Nano 8GB Super, etc. without any per-module fork.
+            # (Hardcoding p3767-0005-nv-super.dtb on NX hardware silently
+            # mis-identifies the SoC as Orin Nano and caps GPU clocks.)
             if [ -f "/boot/arducam/Image" ]; then
                 KERNEL_PATH="/boot/arducam/Image"
-                FDT_PATH="/boot/arducam/dts/dtb/tegra234-p3768-0000+p3767-0005-nv-super.dtb"
             else
                 KERNEL_PATH="/boot/Image"
-                FDT_PATH="/boot/dtb/kernel_tegra234-p3768-0000+p3767-0005-nv.dtb"
+            fi
+
+            if [ -z "$PRIMARY_APPEND" ]; then
+                # Fallback for unusual extlinux layouts where there's no
+                # LABEL primary or its APPEND line is empty. Use the
+                # documented Jetson default that works on both rootfs types
+                # (cbootargs supplies root= via the bootloader cmdline).
+                echo "  Note: could not extract APPEND from primary; using \${cbootargs} fallback."
+                PRIMARY_APPEND='${cbootargs} rw rootwait rootfstype=ext4 mminit_loglevel=4 console=ttyTCU0,115200 firmware_class.path=/etc/firmware fbcon=map:0 video=efifb:off console=tty0'
             fi
 
             sudo tee -a /boot/extlinux/extlinux.conf > /dev/null << BOOTENTRY
@@ -256,12 +292,11 @@ if [ -f "$OVERLAY_SRC" ]; then
 LABEL ArducamIMX219
 	MENU LABEL Custom Header Config: <AR0234 + IMX219 Combined>
 	LINUX ${KERNEL_PATH}
-	FDT ${FDT_PATH}
 	INITRD /boot/initrd
-	APPEND \${cbootargs} root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4 mminit_loglevel=4 console=ttyTCU0,115200 firmware_class.path=/etc/firmware fbcon=map:0 video=efifb:off console=tty0
+	APPEND ${PRIMARY_APPEND}
 	OVERLAYS ${OVERLAY_DST}
 BOOTENTRY
-            echo "✓ Boot entry added"
+            echo "✓ Boot entry added (APPEND inherited from primary, FDT auto-detected)"
         else
             echo "✓ Boot entry already exists"
         fi
@@ -302,7 +337,12 @@ echo "Next steps:"
 echo "1. REBOOT to load the camera device tree overlay"
 echo "2. Close and reopen your terminal (or run: source ~/.bashrc)"
 echo "3. Navigate to VisionSense directory: cd ~/VisionSense"
-echo "4. Build with: colcon build --packages-select visionconnect"
-echo "5. Run with: ros2 launch visionconnect visionsense.launch.py"
+echo "4. Regenerate TensorRT engines for this device's GPU+TRT version:"
+echo "     bash scripts/regenerate_engines.sh"
+echo "   (~20 min total; required because checked-in .engine files are not"
+echo "    portable across Jetsons. Backups of the previous engines are kept"
+echo "    as <name>.prev.<TIMESTAMP> so a partial run never leaves you broken.)"
+echo "5. Build with: colcon build --packages-select visionconnect"
+echo "6. Run with: ros2 launch visionconnect visionsense.launch.py"
 echo ""
 echo "If you encounter any issues, check the README.md"
