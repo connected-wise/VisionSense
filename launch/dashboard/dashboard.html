@@ -1,261 +1,936 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VisionConnect ROS Dashboard</title>
-    <script src="./roslib.js"></script>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f4f4f4;
-            margin: 0;
-            padding: 0;
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0A1F1C">
+<title>VisionSense Dashboard</title>
+<link rel="icon" type="image/png" href="./assets/Logo_Symbol_Dark.png">
+<style>
+:root {
+  --bg:        #0A1F1C;
+  --panel:     #0F2A28;
+  --panel-2:   #14302C;
+  --border:    #1F3F3B;
+  --border-2:  #2A4F49;
+  --text:      #E6F4F1;
+  --muted:     #7A9994;
+  --accent:    #10B981;
+  --secondary: #14B8A6;
+  --warn:      #F59E0B;
+  --danger:    #EF4444;
+  --shadow:    rgba(0, 0, 0, 0.45);
+  --glow:      0 0 0 1px var(--accent), 0 0 18px -4px var(--accent);
+  --radius:    10px;
+  --pad:       12px;
+  --font:      -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter,
+               "Helvetica Neue", Arial, sans-serif;
+  --mono:      ui-monospace, SFMono-Regular, "JetBrains Mono", "Fira Code",
+               Consolas, monospace;
+}
 
-        .container {
-            width: 98%;
-            max-width: 2000px;
-            margin: 20px auto;
-            background-color: #fff;
-            padding: 20px;
-            box-shadow: 0px 0px 5px #aaa;
-        }
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.4;
+  height: 100dvh;
+  width: 100vw;
+  overflow: hidden;           /* no scrollbars — everything must fit */
+  overscroll-behavior: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+body {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-areas: "header" "telemetry" "main" "footer";
+  height: 100dvh;
+}
 
-        .title {
-            position: relative;
-            padding: 20px 10px;  /* Increased padding at top and bottom */
-            background-color: #333;
-            color: #fff;
-            margin-bottom: 20px;
-            font-size: 24px;
-            text-align: center; /* center the title */
-        }
+/* ---------------- Header ---------------- */
+header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 18px;
+  background: linear-gradient(180deg, #0d2522 0%, #0a1f1c 100%);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 rgba(16, 185, 129, 0.05);
+}
+header .brand {
+  display: flex; align-items: center; gap: 12px;
+  flex: 1 1 auto; min-width: 0;
+}
+header .brand img {
+  height: 36px; width: 36px;
+  border-radius: 8px;
+  background: #061a18;
+  padding: 2px;
+  flex-shrink: 0;
+}
+header .brand .title {
+  display: flex; flex-direction: column; gap: 0; min-width: 0;
+}
+header .brand .title .name {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+header .brand .title .sub {
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+.pill .dot {
+  width: 8px; height: 8px; border-radius: 999px;
+  background: var(--muted);
+  box-shadow: 0 0 0 0 transparent;
+}
+.pill.ok    .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.pill.warn  .dot { background: var(--warn);   box-shadow: 0 0 8px var(--warn); }
+.pill.bad   .dot { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
 
-        .logo {
-            position: absolute;
-            left: 10px; /* position logo at the left */
-            top: 50%;
-            transform: translateY(-50%); /* center vertically */
-            height: 50px;
-        }
+/* Shut-down button: deliberately understated until hover, then turns red.
+   Confirmation dialog gates the actual kill so a misclick is recoverable. */
+.exit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease,
+              transform 120ms ease;
+}
+.exit-btn:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(239, 68, 68, 0.10);
+}
+.exit-btn:active { transform: scale(0.97); }
+.exit-btn .glyph { font-size: 15px; line-height: 1; }
 
-        .canvas-container {
-            display: flex;
-            justify-content: space-between;
-        }
+/* Fullscreen "shutting down" overlay shown after the user confirms. */
+.shutdown-overlay {
+  position: fixed; inset: 0;
+  background: rgba(10, 31, 28, 0.95);
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  z-index: 1000;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.shutdown-overlay.show { display: flex; }
+.shutdown-overlay .spinner {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: vs-spin 0.9s linear infinite;
+}
+.shutdown-overlay .msg {
+  font-size: 20px;
+  font-family: var(--mono);
+  color: var(--text);
+  letter-spacing: 0.5px;
+}
+.shutdown-overlay .submsg {
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 480px;
+  text-align: center;
+  line-height: 1.5;
+}
+@keyframes vs-spin { to { transform: rotate(360deg); } }
 
-        .canvas-section {
-            width: 32%;
-            text-align: center;
-            margin: 0 5px;
-        }
+/* ---------------- Telemetry bar ---------------- */
+.telemetry {
+  grid-area: telemetry;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  padding: 8px 13px;
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--text);
+  white-space: nowrap;
+  min-height: 34px;
+}
+.chip .label {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  font-family: var(--font);
+}
+.chip .val { font-weight: 500; }
+.chip .val .sep { color: var(--muted); padding: 0 4px; }
 
-        canvas {
-            display: block;
-            margin: 10px auto;
-            background-color: #ddd;
-        }
+.chip.dms.ok     { border-color: var(--accent); color: #C7F0E1; }
+.chip.dms.ok .label, .chip.dms.ok .val { color: #C7F0E1; }
+.chip.dms.warn   { border-color: var(--warn);   color: #FFE2B5; }
+.chip.dms.warn .label, .chip.dms.warn .val { color: #FFE2B5; }
+.chip.dms.bad    { border-color: var(--danger); color: #FFC4C4; }
+.chip.dms.bad .label, .chip.dms.bad .val { color: #FFC4C4; }
 
-        .canvas-title {
-            margin: 10px 0;
-            font-weight: bold;
-            font-size: 20px; 
-        }
-        
-        .logs {
-            margin-top: 10px;
-            border: 1px solid #ddd;
-            padding: 10px;
-            font-size: 18px;
-            height: 120px; /* Adjust as needed */
-            overflow: auto; /* Scrollbar if content overflows */
-        }
-    </style>
+.chip.fps .val.lo { color: var(--warn); }
+.chip.fps .val.no { color: var(--danger); }
+
+/* ---------------- Main: hero + thumbnails ---------------- */
+main {
+  grid-area: main;
+  display: grid;
+  /* Side panel ~20% (down from 25%) — gives the hero more visual weight
+     while still leaving room for 5 clear thumbnails. */
+  grid-template-columns: minmax(0, 4fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 16px;
+  min-height: 0;             /* let the row collapse if needed */
+  overflow: hidden;
+}
+.hero-wrap {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;             /* grid distributes height — no floor */
+  min-width: 0;
+  box-shadow: 0 10px 24px -16px var(--shadow);
+}
+.hero-wrap img,
+.hero-wrap video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;       /* scale to fit available cell, preserve aspect */
+  background: #000;
+}
+.hero-wrap .hero-label {
+  position: absolute;
+  top: 12px; left: 12px;
+  background: rgba(10, 31, 28, 0.78);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: var(--text);
+  padding: 7px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: var(--mono);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+.hero-wrap .hero-empty {
+  color: var(--muted);
+  font-size: 15px;
+  text-align: center;
+  padding: 24px;
+}
+
+.thumbs {
+  display: grid;
+  grid-template-rows: repeat(5, minmax(0, 1fr));   /* 5 streams: camera, fused, depth, driver, bev */
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.thumb {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: box-shadow 160ms ease, border-color 160ms ease, transform 160ms ease;
+  min-height: 0;
+  min-width: 0;
+}
+.thumb img,
+.thumb video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+.thumb .lbl {
+  position: absolute;
+  bottom: 6px; left: 8px; right: 8px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px;
+  font-family: var(--mono);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  pointer-events: none;
+  color: #E6F4F1;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+.thumb .lbl .hz {
+  background: rgba(10, 31, 28, 0.7);
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* L/R toggle pill on the Camera thumb. Sits in the top-left so it doesn't
+   collide with the active-state LED in the top-right. Click stops
+   propagation so toggling doesn't also trigger setActive(). */
+.cam-toggle {
+  position: absolute;
+  top: 8px; left: 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 14px;
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: var(--text);
+  background: rgba(10, 31, 28, 0.85);
+  border: 1px solid var(--border-2);
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition: border-color 120ms ease, color 120ms ease, transform 120ms ease;
+}
+.cam-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: scale(1.05);
+}
+.cam-toggle .dot {
+  width: 7px; height: 7px; border-radius: 999px;
+  background: var(--accent); box-shadow: 0 0 6px var(--accent);
+}
+.thumb:hover { border-color: var(--border-2); }
+.thumb.active {
+  border: 2px solid var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 0 28px -2px rgba(16, 185, 129, 0.55),
+    0 8px 24px -8px rgba(0, 0, 0, 0.55);
+  background: linear-gradient(180deg,
+                              rgba(16, 185, 129, 0.06) 0%,
+                              rgba(16, 185, 129, 0.02) 100%),
+              var(--panel);
+}
+/* Tiny emerald LED in the top-right corner of the active thumb. */
+.thumb.active::after {
+  content: "";
+  position: absolute;
+  top: 6px; right: 6px;
+  width: 8px; height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+/* ---------------- Footer / logs (overlay — does NOT take vertical space) ---------------- */
+footer {
+  grid-area: footer;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  flex-shrink: 0;
+}
+.logs-toggle {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 8px 16px;
+  text-align: left;
+  font-size: 12px;
+  font-family: var(--mono);
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.logs-toggle:hover { color: var(--text); }
+/* Logs are an absolutely-positioned drawer over the hero so opening them
+   never resizes the video grid. */
+.logs {
+  display: none;
+  position: fixed;
+  left: 16px; right: 16px; bottom: 56px;
+  z-index: 50;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 20px 40px -20px rgba(0,0,0,0.6);
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+.logs.open { display: grid; }
+.log-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text);
+  max-height: 140px;
+  overflow: auto;
+}
+.log-card h4 {
+  margin: 0 0 6px 0;
+  font-size: 11px;
+  font-family: var(--font);
+  color: var(--accent);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.attribution {
+  padding: 6px 16px 8px 16px;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  border-top: 1px solid var(--border);
+}
+.attribution a { color: var(--secondary); text-decoration: none; }
+.attribution a:hover { color: var(--accent); }
+
+/* ---------------- Responsive ---------------- */
+/* Below 1280px wide we stack: hero on top, thumbs as a horizontal row of 5.
+   On phones we drop to a 5-column thumb row at the bottom. Everything still
+   fits within 100dvh — no scrolling. */
+@media (max-width: 1280px) {
+  main {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 0.35fr);
+  }
+  .thumbs {
+    grid-template-rows: none;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+@media (max-width: 768px) {
+  header { padding: 8px 12px; flex-wrap: wrap; }
+  header .brand .title .sub { display: none; }
+  .telemetry { padding: 6px 12px; gap: 6px; }
+  .chip { padding: 6px 10px; font-size: 12px; }
+  main { padding: 8px 12px; gap: 8px; }
+  .thumbs { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .cam-toggle { padding: 4px 10px; font-size: 12px; }
+}
+@media (max-width: 480px) {
+  header .brand img { height: 30px; width: 30px; }
+  header .brand .title .name { font-size: 15px; }
+  .pill { padding: 5px 9px; font-size: 11px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+/* Subtle scrollbar styling for log cards */
+.log-card::-webkit-scrollbar { width: 6px; }
+.log-card::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 3px; }
+.log-card::-webkit-scrollbar-track { background: transparent; }
+</style>
 </head>
-
 <body>
 
-<div class="container">
+<header>
+  <div class="brand">
+    <img src="./assets/Logo_Symbol_Dark.png" alt="VisionSense">
     <div class="title">
-        <img class="logo" src="cw-logo.webp" alt="Connected Wise LLC">
-        VisionConnect ROS Dashboard
+      <span class="name">VisionSense</span>
+      <span class="sub">Autonomous Perception Dashboard</span>
     </div>
+  </div>
+  <span id="connPill" class="pill"><span class="dot"></span><span id="connText">Connecting…</span></span>
+  <button id="exitBtn" class="exit-btn" type="button" title="Gracefully shut down all VisionSense nodes">
+    <span class="glyph" aria-hidden="true">⏻</span>
+    <span>Shut Down</span>
+  </button>
+</header>
 
-    <!-- First Row of Canvases -->
-    <div class="canvas-container">
-        <div class="canvas-section">
-            <div class="canvas-title">Raw Camera Output</div>
-            <canvas id="cameraCanvas" width="640" height="360"></canvas>
-            <div class="logs" id="cameraLog">
-                <!-- JS will insert object detection logs here -->
-            </div>
-        </div>
-
-        <div class="canvas-section">
-            <div class="canvas-title">Lane Detection Output</div>
-            <canvas id="laneCanvas" width="640" height="360"></canvas>
-            <div class="logs" id="lanesLog">
-                <!-- JS will insert lane detection logs here -->
-            </div>
-        </div>
-
-        <div class="canvas-section">
-            <div class="canvas-title">Object Detection Output</div>
-            <canvas id="objectCanvas" width="640" height="360"></canvas>
-            <div class="logs" id="detectionLog">
-                <!-- JS will insert object detection logs here -->
-            </div>
-        </div>
-    </div>
-
-    <!-- Second Row of Canvases -->
-    <div class="canvas-container">
-        <!-- Traffic Sign and Light Recognition -->
-        <div class="canvas-section">
-            <div class="canvas-title">Traffic Sign and Light Recognition</div>
-            <canvas id="trafficSignCanvas" width="640" height="360"></canvas>
-            <div class="logs" id="trafficSignLog">
-                <!-- JS will insert logs here -->
-            </div>
-        </div>
-
-        <!-- Fused Perception Output -->
-        <div class="canvas-section" style="flex-basis: 64%; margin-right: 40px;">
-            <div class="canvas-title">Fused Perception Output</div>
-            <canvas id="fusedOutputCanvas" width="1310" height="730"></canvas>
-        </div>
-    </div>
+<div class="shutdown-overlay" id="shutdownOverlay" role="status" aria-live="polite">
+  <div class="spinner"></div>
+  <div class="msg">Shutting down VisionSense…</div>
+  <div class="submsg">All ROS nodes (cameras, perception, depth, GUI) are stopping gracefully. You can close this window when it goes blank.</div>
 </div>
 
+<nav class="telemetry">
+  <span class="chip" id="gpsChip">
+    <span class="label">GPS</span>
+    <span class="val" id="gpsVal">— · —</span>
+  </span>
+  <span class="chip" id="imuChip">
+    <span class="label">IMU</span>
+    <span class="val" id="imuVal">ax — ay — az —</span>
+  </span>
+  <span class="chip dms" id="dmsChip">
+    <span class="label">DRIVER</span>
+    <span class="val" id="dmsVal">—</span>
+  </span>
+  <span class="chip fps" id="fpsChip">
+    <span class="label">HZ</span>
+    <span class="val" id="fpsVal">fused — · depth — · driver — · bev —</span>
+  </span>
+</nav>
+
+<main>
+  <section class="hero-wrap">
+    <video id="heroVideo" autoplay muted playsinline hidden></video>
+    <div id="heroEmpty" class="hero-empty">Waiting for stream…</div>
+    <div class="hero-label" id="heroLabel">Fused Perception</div>
+  </section>
+
+  <aside class="thumbs">
+    <button class="thumb active" data-stream="1" aria-label="Fused Perception">
+      <video autoplay muted playsinline></video>
+      <span class="lbl"><span>Fused</span><span class="hz" data-hz="fused">—</span></span>
+    </button>
+    <button class="thumb" data-stream="5" aria-label="Raw Camera (live)">
+      <span class="cam-toggle" id="camToggle" data-side="left" title="Toggle Left/Right eye">
+        <span class="dot"></span><span id="camToggleLabel">L</span>
+      </span>
+      <video autoplay muted playsinline></video>
+      <span class="lbl"><span>Camera</span><span class="hz" data-hz="camera">—</span></span>
+    </button>
+    <button class="thumb" data-stream="2" aria-label="Stereo Depth">
+      <video autoplay muted playsinline></video>
+      <span class="lbl"><span>Depth</span><span class="hz" data-hz="depth">—</span></span>
+    </button>
+    <button class="thumb" data-stream="3" aria-label="Driver Monitor">
+      <video autoplay muted playsinline></video>
+      <span class="lbl"><span>Driver</span><span class="hz" data-hz="driver">—</span></span>
+    </button>
+    <button class="thumb" data-stream="4" aria-label="Bird's-Eye View">
+      <video autoplay muted playsinline></video>
+      <span class="lbl"><span>BEV</span><span class="hz" data-hz="bev">—</span></span>
+    </button>
+  </aside>
+</main>
+
 <footer>
-    <div class="container">
-        <p style="text-align:center; font-size: 14px; padding: 20px 0; border-top: 1px solid #ddd; margin-top: 20px;">
-            &copy; 2023 Connected Wise LLC. This tool is designed by <a href="https://connectedwise.com">Connected Wise LLC</a>. All rights reserved.
-        </p>
-    </div>
+  <button class="logs-toggle" id="logsToggle" aria-expanded="false">▸ Show detection logs</button>
+  <div class="logs" id="logs">
+    <div class="log-card"><h4>Detect</h4><div id="logDetect">—</div></div>
+    <div class="log-card"><h4>Lanes</h4><div id="logLanes">—</div></div>
+    <div class="log-card"><h4>Signs</h4><div id="logClassify">—</div></div>
+  </div>
+  <div class="attribution">
+    &copy; 2026 <a href="https://connectedwise.com">Connected Wise LLC</a>
+    &middot; VisionSense vision stack
+  </div>
 </footer>
 
 <script>
-    var ros = new ROSLIB.Ros({
-        url: 'ws://192.168.12.197:9090'
-    });
+(() => {
+  "use strict";
 
-    ros.on('connection', function () {
-        console.log('Connected to websocket server.');
-    });
+  // ---------- DOM refs ----------
+  const $ = (id) => document.getElementById(id);
+  const heroVideo = $("heroVideo");
+  const heroEmpty = $("heroEmpty");
+  const heroLabel = $("heroLabel");
+  // Default hero label matches activeStream = 5 (Raw Camera).
+  // (heroLabel's HTML text default — update once.)
+  const connPill  = $("connPill");
+  const connText  = $("connText");
+  const gpsVal    = $("gpsVal");
+  const imuVal    = $("imuVal");
+  const dmsChip   = $("dmsChip");
+  const dmsVal    = $("dmsVal");
+  const fpsVal    = $("fpsVal");
+  const hzEls = {
+    fused:  document.querySelector('[data-hz="fused"]'),
+    depth:  document.querySelector('[data-hz="depth"]'),
+    driver: document.querySelector('[data-hz="driver"]'),
+    bev:    document.querySelector('[data-hz="bev"]'),
+  };
+  const STREAM_LABELS = {
+    1: "Fused Perception",
+    2: "Stereo Depth",
+    3: "Driver Monitor",
+    4: "Bird's-Eye View",
+    5: "Raw Camera",
+    6: "Lane Overlay",
+    7: "Detections",
+    8: "Sign Classifier",
+  };
 
-    ros.on('error', function (error) {
-        console.log('Error connecting to websocket server:', error);
-    });
+  // ---------- Stream registry ----------
+  // streams[id] = { video, thumbBtn, pc, mediaStream }
+  const streams = {};
+  // Streams we negotiate WebRTC for, in thumbnail display order. Fused
+  // first because it's the headline view (detection + lanes + signs + ADAS).
+  const VISIBLE_STREAMS = [1, 5, 2, 3, 4];
+  document.querySelectorAll(".thumb").forEach((btn) => {
+    const id = Number(btn.dataset.stream);
+    streams[id] = {
+      video:       btn.querySelector("video"),
+      thumbBtn:    btn,
+      pc:          null,
+      mediaStream: null,
+    };
+    btn.addEventListener("click", () => setActive(id));
+  });
+  let activeStream = 1;  // Fused Perception — the headline view
 
-    ros.on('close', function () {
-        console.log('Connection to websocket server closed.');
-    });
-
-    function subscribeAndDraw(topicName, canvasId) {
-        var topic = new ROSLIB.Topic({
-            ros: ros,
-            name: topicName,
-            messageType: 'sensor_msgs/CompressedImage'
-        });
-
-        var canvas = document.getElementById(canvasId);
-        var context = canvas.getContext('2d');
-
-        topic.subscribe(function (message) {
-            var imageUrl = "data:image/jpeg;base64," + message.data;
-            var image = new Image();
-            image.src = imageUrl;
-            image.onload = function () {
-                context.drawImage(image, 0, 0);
-            };
-        });
+  function setActive(id) {
+    if (!streams[id]) return;
+    activeStream = id;
+    for (const k of Object.keys(streams)) {
+      streams[k].thumbBtn.classList.toggle("active", Number(k) === id);
     }
-
-    subscribeAndDraw('/dashboard/camera', 'cameraCanvas');
-    subscribeAndDraw('/dashboard/lanes', 'laneCanvas');
-    subscribeAndDraw('/dashboard/detections', 'objectCanvas');
-    subscribeAndDraw('/dashboard/gui', 'fusedOutputCanvas');
-
-    // Lane logs subscriber
-    var lanesLogTopic = new ROSLIB.Topic({
-        ros : ros,
-        name : '/dashboard/lanedet_logs',
-        messageType : 'std_msgs/String'
-    });
-
-    lanesLogTopic.subscribe(function(message) {
-        // Update the logs under the Lane Detection Output window
-        document.getElementById('lanesLog').innerHTML = message.data;
-    });
-
-    // Detection logs subscriber
-    var detectionsLogTopic = new ROSLIB.Topic({
-        ros : ros,
-        name : '/dashboard/detect_logs',
-        messageType : 'std_msgs/String'
-    });
-
-    detectionsLogTopic.subscribe(function(message) {
-        // Update the logs under the Object Detection Output window
-        document.getElementById('detectionLog').innerHTML = message.data;
-    });
-
-    // Camera logs subscriber
-    // Frame rate subscriber
-
-    var frameRateTopic = new ROSLIB.Topic({
-        ros : ros,
-        name : '/camera/framerate',
-        messageType : 'std_msgs/Float32'
-    });
-
-
-    var latestFrameRate = null;
-    var latestTimestamp = null;
-
-        // Frame timestamp subscriber
-    var frameTimestampTopic = new ROSLIB.Topic({
-        ros : ros,
-        name : '/camera/time',
-        messageType : 'std_msgs/Header'
-    });
-
-    function updateCameraLog() {
-        var cameraLogDiv = document.getElementById('cameraLog');
-        var content = "";
-
-        if (latestFrameRate !== null) {
-            content += "Frame Rate: " + latestFrameRate.toFixed(2) + " FPS";
-        }
-    
-        if (latestTimestamp !== null) {
-            content += "<br>Time stamp: " + latestTimestamp;
-        }
-
-        cameraLogDiv.innerHTML = content;
+    heroLabel.textContent = STREAM_LABELS[id] || ("Stream " + id);
+    const ms = streams[id].mediaStream;
+    if (ms) {
+      heroVideo.srcObject = ms;
+      heroVideo.hidden = false;
+      heroEmpty.style.display = "none";
+    } else {
+      heroVideo.srcObject = null;
+      heroVideo.hidden = true;
+      heroEmpty.style.display = "";
     }
+  }
 
+  // ---------- WebRTC negotiation per stream ----------
+  function send(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
+    }
+  }
 
-    frameRateTopic.subscribe(function(message) {
-        // Update the latest frame rate and the cameraLog div
-        latestFrameRate = message.data;
-        updateCameraLog();
+  async function startWebRTC(id) {
+    const s = streams[id];
+    if (!s || s.pc) return;
+    const pc = new RTCPeerConnection({
+      iceServers: [],            // LAN-only — no STUN/TURN needed
+      bundlePolicy: "max-bundle",
     });
+    s.pc = pc;
 
+    pc.ontrack = (ev) => {
+      const ms = ev.streams[0] || new MediaStream([ev.track]);
+      s.mediaStream = ms;
+      s.video.srcObject = ms;
+      // Zero the receiver's jitter buffer hint — Chrome defaults to ~100 ms
+      // of buffering for smoothness, which dominates perceived latency on
+      // localhost. We accept frame jitter for the latency win.
+      try {
+        if ("playoutDelayHint" in ev.receiver) ev.receiver.playoutDelayHint = 0;
+        if ("jitterBufferTarget" in ev.receiver) ev.receiver.jitterBufferTarget = 0;
+      } catch {}
+      if (id === activeStream) {
+        heroVideo.srcObject = ms;
+        heroVideo.hidden = false;
+        heroEmpty.style.display = "none";
+      }
+    };
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        send({
+          t: "webrtc-ice",
+          stream: id,
+          sdpMLineIndex: ev.candidate.sdpMLineIndex || 0,
+          candidate: ev.candidate.candidate,
+        });
+      }
+    };
+    pc.onconnectionstatechange = () => {
+      if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
+        // Tear down + retry after a beat.
+        teardownWebRTC(id);
+        setTimeout(() => startWebRTC(id), 1500);
+      }
+    };
 
-    frameTimestampTopic.subscribe(function(message) {
-        // Update the latest timestamp and the cameraLog div
-        var secs = message.stamp.sec;
-        var nsecs = message.stamp.nanosec;
-        latestTimestamp = secs + "." + nsecs;
-        updateCameraLog();
+    send({ t: "webrtc-request", stream: id });
+  }
+
+  async function onWebRTCOffer(id, sdp) {
+    const s = streams[id];
+    if (!s || !s.pc) return;
+    try {
+      await s.pc.setRemoteDescription({ type: "offer", sdp });
+      const answer = await s.pc.createAnswer();
+      await s.pc.setLocalDescription(answer);
+      send({ t: "webrtc-answer", stream: id, sdp: answer.sdp });
+    } catch (e) {
+      console.error("webrtc offer handling failed for stream", id, e);
+    }
+  }
+
+  async function onWebRTCIce(id, mline, candidate) {
+    const s = streams[id];
+    if (!s || !s.pc) return;
+    try {
+      await s.pc.addIceCandidate({
+        candidate, sdpMLineIndex: mline, sdpMid: String(mline),
+      });
+    } catch (e) {
+      // Trickle ICE may arrive before remote description — browser queues it
+      // in modern impls. Log only if it's a real surprise.
+    }
+  }
+
+  function teardownWebRTC(id) {
+    const s = streams[id];
+    if (!s) return;
+    if (s.pc) {
+      try { s.pc.close(); } catch {}
+      s.pc = null;
+    }
+    s.mediaStream = null;
+    s.video.srcObject = null;
+    if (id === activeStream) {
+      heroVideo.srcObject = null;
+      heroVideo.hidden = true;
+      heroEmpty.style.display = "";
+    }
+  }
+
+  // ---------- Telemetry handlers ----------
+  function fmtCoord(value, posSuffix, negSuffix) {
+    if (value === undefined || value === null || isNaN(value)) return "—";
+    const abs = Math.abs(value).toFixed(4);
+    return abs + "°" + (value >= 0 ? posSuffix : negSuffix);
+  }
+  const GPS_STATUS = { "-1": "NO FIX", "0": "FIX", "1": "SBAS", "2": "GBAS" };
+
+  function onGps(m) {
+    const lat = fmtCoord(m.lat, "N", "S");
+    const lon = fmtCoord(m.lon, "E", "W");
+    const alt = (m.alt !== undefined && !isNaN(m.alt)) ? m.alt.toFixed(1) + " m" : "—";
+    const fix = GPS_STATUS[String(m.fix)] || "?";
+    gpsVal.innerHTML = lat + ' <span class="sep">·</span> ' + lon
+                     + ' <span class="sep">·</span> ' + alt
+                     + ' <span class="sep">·</span> ' + fix;
+  }
+  function onImu(m) {
+    const f = (x) => (x === undefined || isNaN(x)) ? "—" : x.toFixed(2);
+    imuVal.innerHTML = "ax " + f(m.ax)
+                     + ' <span class="sep">·</span> ay ' + f(m.ay)
+                     + ' <span class="sep">·</span> az ' + f(m.az);
+  }
+  function onDriver(m) {
+    const state = (m.state || "—").toString();
+    dmsVal.textContent = state;
+    dmsChip.classList.remove("ok", "warn", "bad");
+    if (state === "ALERT") dmsChip.classList.add("ok");
+    else if (state === "DISTRACTED") dmsChip.classList.add("warn");
+    else if (state === "DROWSY" || state === "NO_DRIVER") dmsChip.classList.add("bad");
+  }
+  function onFps(m) {
+    const f = (v) => (v === undefined || v === null) ? "—" : String(v);
+    fpsVal.innerHTML =
+        'fused ' + f(m.fused) + ' <span class="sep">·</span> '
+      + 'depth ' + f(m.depth) + ' <span class="sep">·</span> '
+      + 'driver ' + f(m.driver) + ' <span class="sep">·</span> '
+      + 'bev ' + f(m.bev);
+    for (const k of Object.keys(hzEls)) {
+      if (m[k] === undefined) continue;
+      hzEls[k].textContent = String(m[k]);
+      hzEls[k].classList.remove("lo", "no");
+      if (m[k] === 0)      hzEls[k].classList.add("no");
+      else if (m[k] < 8)   hzEls[k].classList.add("lo");
+    }
+  }
+  function onLog(m) {
+    const targets = { detect: "logDetect", lanedet: "logLanes", classify: "logClassify" };
+    const el = $(targets[m.src]);
+    if (el) el.innerHTML = m.html;
+  }
+
+  // ---------- WebSocket lifecycle ----------
+  function setConn(state, text) {
+    connPill.classList.remove("ok", "warn", "bad");
+    if (state) connPill.classList.add(state);
+    connText.textContent = text;
+  }
+  setConn("warn", "Connecting…");
+
+  // Build the WS URL from the page's own URL when served over HTTP(S).
+  // When the page is opened via file:// (e.g. by double-clicking the HTML
+  // file) location.host is empty and naive concatenation produces "ws:///ws",
+  // which the browser normalises to ws://ws/ — ERR_NAME_NOT_RESOLVED. Fall
+  // back to localhost:8080, with a ?host=ip:port override for remote testing.
+  const WS_URL = (() => {
+    const httpish = (location.protocol === "http:" || location.protocol === "https:");
+    if (httpish && location.host) {
+      const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+      return scheme + location.host + "/ws";
+    }
+    const override = new URLSearchParams(location.search).get("host");
+    return "ws://" + (override || "localhost:8080") + "/ws";
+  })();
+  let ws = null;
+  let retryMs = 1000;
+
+  function connect() {
+    setConn("warn", "Connecting…");
+    try {
+      ws = new WebSocket(WS_URL, "vc-ws");
+    } catch (e) {
+      scheduleReconnect();
+      return;
+    }
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => {
+      retryMs = 1000;
+      setConn("ok", "Connected");
+      // Kick off WebRTC negotiation for every visible stream as soon as the
+      // signaling channel is up. Each gets its own RTCPeerConnection.
+      for (const id of VISIBLE_STREAMS) startWebRTC(id);
+    };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data !== "string") return;  // no binary path anymore
+      let m;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      switch (m.t) {
+        case "hello":         break;
+        case "gps":           onGps(m); break;
+        case "imu":           onImu(m); break;
+        case "driver":        onDriver(m); break;
+        case "fps":           onFps(m); break;
+        case "log":           onLog(m); break;
+        case "webrtc-offer":  onWebRTCOffer(m.stream, m.sdp); break;
+        case "webrtc-ice":    onWebRTCIce(m.stream, m.sdpMLineIndex || 0, m.candidate); break;
+      }
+    };
+    ws.onerror = () => {
+      setConn("bad", "Connection error");
+    };
+    ws.onclose = () => {
+      setConn("bad", "Disconnected · retrying " + (retryMs / 1000) + "s");
+      // Tear down WebRTC — server-side pipelines will be cleaned up when it
+      // sees the WS close. We'll renegotiate fresh on reconnect.
+      for (const id of VISIBLE_STREAMS) teardownWebRTC(id);
+      scheduleReconnect();
+    };
+  }
+  function scheduleReconnect() {
+    setTimeout(connect, retryMs);
+    retryMs = Math.min(retryMs * 2, 10000);
+  }
+  connect();
+
+  // ---------- Logs toggle ----------
+  const logs = $("logs");
+  const toggle = $("logsToggle");
+  toggle.addEventListener("click", () => {
+    const open = logs.classList.toggle("open");
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    toggle.textContent = (open ? "▾ Hide" : "▸ Show") + " detection logs";
+  });
+
+  // ---------- Shut-down button ----------
+  // Sends {"t":"shutdown"} → server SIGINTs the whole ros2 launch chain
+  // (cameras need SIGINT specifically, not SIGTERM/SIGKILL). Confirmation
+  // dialog is mandatory because a misclick stops the entire perception
+  // stack.
+  const exitBtn = $("exitBtn");
+  const shutdownOverlay = $("shutdownOverlay");
+  let shuttingDown = false;
+  if (exitBtn) {
+    exitBtn.addEventListener("click", () => {
+      if (shuttingDown) return;
+      const ok = confirm(
+        "Shut down VisionSense?\n\n" +
+        "Every ROS node (cameras, detection, lanes, depth, driver " +
+        "monitor, GUI, dashboard) will stop gracefully. You'll need to " +
+        "run ./launch_visionsense.sh again to bring it back up."
+      );
+      if (!ok) return;
+      shuttingDown = true;
+      send({ t: "shutdown" });
+      shutdownOverlay.classList.add("show");
+      exitBtn.disabled = true;
+      exitBtn.style.opacity = "0.5";
     });
+  }
 
+  // ---------- Camera L/R toggle ----------
+  // Sends {"t":"camera-side","side":"left|right"} to the server, which then
+  // routes whichever stereo eye matches into STREAM_CAMERA. The button sits
+  // ON the Camera thumb but uses stopPropagation so clicking it doesn't also
+  // trigger the thumb's setActive() click handler.
+  const camToggle = $("camToggle");
+  const camToggleLabel = $("camToggleLabel");
+  if (camToggle) {
+    camToggle.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const next = camToggle.dataset.side === "left" ? "right" : "left";
+      camToggle.dataset.side = next;
+      camToggleLabel.textContent = next === "left" ? "L" : "R";
+      send({ t: "camera-side", side: next });
+    });
+  }
+
+  // Keep the page alive on iOS Safari when tabbed away (best-effort).
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" &&
+        (!ws || ws.readyState === WebSocket.CLOSED)) {
+      retryMs = 1000;
+      connect();
+    }
+  });
+})();
 </script>
 
 </body>
-
 </html>

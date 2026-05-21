@@ -25,7 +25,8 @@ static constexpr float CAM_CX = 600.0f;
 static constexpr float CAM_CY = 600.0f;
 
 // Class-based size priors {length, width} in meters (top-down footprint)
-// Index: 0=pedestrian, 1=cyclist, 2=car, 3=bus, 4=truck, 5=train, 6=traffic_light, 7=traffic_sign
+// Index: 0=pedestrian, 1=cyclist, 2=car, 3=bus, 4=truck, 5=train,
+//        6=traffic_light, 7=traffic_sign, 8=bike
 struct SizePrior { float length, width; };
 static constexpr SizePrior SIZE_PRIORS[] = {
     {0.5f, 0.5f},    // pedestrian
@@ -36,6 +37,7 @@ static constexpr SizePrior SIZE_PRIORS[] = {
     {15.0f, 3.0f},   // train
     {0.3f, 0.3f},    // traffic light (not drawn, but avoids out-of-bounds)
     {0.3f, 0.3f},    // traffic sign
+    {1.8f, 0.7f},    // bike (rider-less)
 };
 static constexpr int NUM_SIZE_PRIORS = sizeof(SIZE_PRIORS) / sizeof(SIZE_PRIORS[0]);
 
@@ -49,6 +51,7 @@ static const cv::Scalar CLASS_COLORS[] = {
     cv::Scalar(255, 0, 255),   // train - magenta
     cv::Scalar(0, 255, 255),   // traffic light - cyan
     cv::Scalar(255, 255, 0),   // traffic sign - cyan
+    cv::Scalar(90, 240, 180),  // bike - light green
 };
 static constexpr int NUM_CLASS_COLORS = sizeof(CLASS_COLORS) / sizeof(CLASS_COLORS[0]);
 
@@ -329,8 +332,8 @@ static std::vector<BEVObject> project_detections(const cv::Mat& depth)
         int bw = det->boxes[i].data[2];
         int bh = det->boxes[i].data[3];
 
-        // Skip traffic lights and signs for BEV (not ground objects)
-        if (cls >= 6) continue;
+        // Skip traffic lights and signs for BEV (not ground objects). bikes (8) are kept.
+        if (cls == 6 || cls == 7) continue;
 
         // Bottom-center of bounding box
         float u = bx + bw / 2.0f;

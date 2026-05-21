@@ -41,22 +41,37 @@ find_package(rcl_interfaces REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(X11 REQUIRED)
 
+# Embedded HTTP + WebSocket server inside node_dashboard. apt: libwebsockets-dev.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBWEBSOCKETS REQUIRED libwebsockets)
+
+# WebRTC video streaming via GStreamer webrtcbin + NVENC. All packages ship
+# with JetPack: libgstreamer1.0-dev + libgstreamer-plugins-bad1.0-dev.
+pkg_check_modules(GST REQUIRED
+    gstreamer-1.0
+    gstreamer-app-1.0
+    gstreamer-webrtc-1.0
+    gstreamer-sdp-1.0
+    glib-2.0
+    gobject-2.0)
+
 link_directories(/usr/lib/aarch64-linux-gnu/tegra)
 link_directories(/opt/nvidia/vpi2/lib64)
 link_directories(/usr/local/cuda/lib64)
 
-# CUDA library for stereo rotation kernel
+# CUDA library for stereo rotation kernel (camera_stereo crop + split + flip)
 cuda_add_library(stereo_rotate_cuda STATIC src/cuda/stereo_rotate.cu)
 set_target_properties(stereo_rotate_cuda PROPERTIES CUDA_ARCHITECTURES "87")
-
-# CUDA preprocessing kernel for Fast-FoundationStereo stereo_depth node
-cuda_add_library(stereo_preproc_cuda STATIC src/cuda/stereo_preproc.cu)
-set_target_properties(stereo_preproc_cuda PROPERTIES CUDA_ARCHITECTURES "87")
 
 # CUDA library for fused TRT-input preprocessing (replaces OpenCV CUDA ops)
 cuda_add_library(preprocess_cuda STATIC src/cuda/preprocess.cu)
 target_include_directories(preprocess_cuda PUBLIC src/common/include)
 set_target_properties(preprocess_cuda PROPERTIES CUDA_ARCHITECTURES "87")
+
+# CUDA library for stereo rectify + resize + ImageNet norm + HWC->CHW fused
+# preprocessing — consumed by node_stereo_depth.
+cuda_add_library(stereo_rectify_cuda STATIC src/cuda/stereo_rectify.cu)
+set_target_properties(stereo_rectify_cuda PROPERTIES CUDA_ARCHITECTURES "87")
 
 # Shared library
 file(GLOB_RECURSE common_src RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} src/common/*.cpp)
@@ -77,13 +92,24 @@ add_executable(detect src/node_detect.cpp ${common_src})
 add_executable(classify src/node_classify.cpp ${common_src})
 add_executable(lanedet src/node_lanedet.cpp ${common_src})
 add_executable(preview src/node_preview.cpp ${common_src})
-add_executable(dashboard src/node_dashboard.cpp ${common_src})
+add_executable(dashboard
+    src/node_dashboard.cpp
+    src/dashboard_server.cpp
+    src/webrtc_server.cpp
+    ${common_src})
+target_include_directories(dashboard PRIVATE
+    ${LIBWEBSOCKETS_INCLUDE_DIRS}
+    ${GST_INCLUDE_DIRS})
+target_link_directories(dashboard PRIVATE
+    ${LIBWEBSOCKETS_LIBRARY_DIRS}
+    ${GST_LIBRARY_DIRS})
+target_compile_options(dashboard PRIVATE ${GST_CFLAGS_OTHER})
 add_executable(gui src/node_gui.cpp ${common_src})
 add_executable(adas src/node_adas.cpp ${common_src})
 add_executable(driver_monitor src/node_driver_monitor.cpp ${common_src})
 add_executable(imu_gps src/node_imu_gps.cpp ${common_src})
 add_executable(bev src/node_bev.cpp ${common_src})
-add_executable(stereo_depth src/node_stereo_depth.cpp)
+add_executable(stereo_depth src/node_stereo_depth.cpp ${common_src})
 
 # 'include' directories
 include_directories(src/include ${catkin_INCLUDE_DIRS} ${CUDA_INCLUDE_DIRS})
@@ -110,6 +136,7 @@ target_link_libraries(camera_stereo
     ${TENSORRT_LIBS}
     common
     stereo_rotate_cuda
+    yaml-cpp
 )
 target_link_libraries(detect
     ${catkin_LIBRARIES}
@@ -146,6 +173,8 @@ target_link_libraries(dashboard
     ${TENSORRT_LIBS}
     jetson-inference
     common
+    ${LIBWEBSOCKETS_LIBRARIES}
+    ${GST_LIBRARIES}
 )
 
 target_link_libraries(gui
@@ -192,10 +221,11 @@ target_link_libraries(imu_gps
 target_link_libraries(stereo_depth
     ${catkin_LIBRARIES}
     ${OpenCV_LIBRARIES}
+    common
     nvinfer
     cudart
-    dl
-    stereo_preproc_cuda
+    stereo_rectify_cuda
+    yaml-cpp
 )
 
 # Include custom messages
@@ -324,7 +354,7 @@ ament_target_dependencies(stereo_depth
     rclcpp
     sensor_msgs
     std_msgs
-    message_filters
+    OpenCV
 )
 
 # Install executables to ROS project
@@ -347,6 +377,7 @@ install(PROGRAMS
     scripts/display_driver_monitor.py
     scripts/test_stereo_from_files.py
     scripts/display_disparity.py
+    scripts/stereo_depth_lightstereo.py
     DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,96 +1,104 @@
-sensors:
-    uv_camera:              true
-    zed_camera:             true
-    gps_module:             true
+# UI control: which front-ends to bring up on launch.
+ui:
+    display:   false     # native cv::imshow GUI window (node_gui composite)
+    dashboard: true     # auto-open Chromium in kiosk mode to the dashboard URL
+
+# Single-eye topic routing for downstream consumers (detect/lanedet/gui/dashboard).
+# stereo_depth ignores this and always uses both eyes.
+stereo:
+    main_eye: "left"    # "left" or "right" — flipped from "right" after the
+                        # physical sensor swap; downstream nodes (detect,
+                        # lanedet, gui, dashboard) consume this topic. Verify
+                        # the eye actually looks right once depth is recalibrated.
 
 camera:
     ros__parameters:
-        resource:           "csi://0"   # IMX219 CSI mono camera for driver monitoring
-        width:              1280        # 720p for driver monitor panel
+        resource:           "csi://0"   # IMX219 CSI mono cam for driver monitor
+        width:              1280
         height:             720
 
 camera_stereo:
     ros__parameters:
-        resource:           "/dev/video1"   # Arducam stereo camera
-        width:              3840        # Full stereo width (1920 left + 1920 right)
-        height:             1200        # Stereo height (output will be 1200x1200 per eye)
+        resource:           "/dev/video1"   # Arducam stereo
+        width:              3840        # full stereo (1920 L + 1920 R)
+        height:             1200
         framerate:          30
-        rotated_lenses:     false        # true: rotate 90° after split, false: no rotation
-        cuda_flip:          "rotate-180" # CUDA flip (fast): "rotate-180", "vertical-flip", "horizontal-flip", or "" for none
+        # rotated_lenses=false → 1440×900 per eye (inner-edge horizontal crop +
+        # symmetric vertical crop). true → 1200×1200 (90° per-eye rotation).
+        rotated_lenses:     false
+        cuda_flip:          "rotate-180" # "rotate-180" | "vertical-flip" | "horizontal-flip" | ""
         disparity_range:    128
-        sensor_width_mm:    5.76
-        baseline_mm:        100.0       # Distance between stereo lenses (mm)
-        focal_length_mm:    3.6         # AR0234 M12 lens focal length (mm)
+        # AR0234 sensor is 5.76 mm wide. The 1440-wide eye is center-cropped to
+        # 900×900 (= 5.76 × 900/1920 = 2.7 mm) before LightStereo resizes to 320.
+        sensor_width_mm:    2.7
+        baseline_mm:        101.3
+        focal_length_mm:    3.6
+        calibration_file:   "stereo_calib.yaml"   # produced by scripts/compute_stereo_calib.py
 
-stereo_depth:
+# LightStereo-S TRT (OpenStereo, ICRA 2025). ~16 ms GPU on Orin NX at 320×512.
+# engine_file_path is relative to share/visionconnect/graphs/stereo-depth.
+stereo_depth_lightstereo:
     ros__parameters:
-        # Fast-FoundationStereo (single TRT engine + GWC CUDA plugin)
-        engine:                 "stereo-depth/stereo_plugin_320_iters4.engine"
-        plugin:                 "stereo-depth/libgwc_plugin.so"
-        max_disparity:          192.0   # Must match the value baked into the engine
-        warmup_iterations:      5
-        baseline_mm:            100.0
-        focal_length_mm:        3.6
-        sensor_width_mm:        5.76
-        max_depth_m:            50.0    # Max depth clamp for colorized visualization (meters)
-        color_publish_size:     480     # Resolution for colorized depth visualization
-        depth_publish_size:     0       # /depth topic res: 0=native source, 480=fast model-res (saves ~15ms)
-preview:
-    ros__parameters:
-        output:             "display://0"
-        width:              960
-        height:             540        
+        engine_file_path:       "lightstereo_s_320x512.engine"
+        depth_vmax:             5.0     # colormap upper bound (m) — tune for the
+                                        # scene; 5 m for indoor, 20 m for outdoor.
+                                        # Only affects /stereo_depth/depth_color
+                                        # viz; /stereo_depth/depth is unchanged.
+        warmup_iters:           3
+        sync_slop_s:            0.05
+        depth_color_publish_w:  0       # 0 = native eye width; <native = downscale (artifacts on holes)
 
 detect:
     ros__parameters:
-        model:              "detect.engine"
-        labels:             "labels_detect.txt"        
+        model:              "yolo26_cw.engine"   # YOLO26s end2end (NMS-free)
+        labels:             "labels_detect.txt"
+        # Per-class confidence thresholds (only [0] is currently consumed).
         thresholds:
-            - 0.40          # Applied to all object classes
-            - 0.45           # Pedestrian objects
-            - 0.45          # Cyclist objects
-            - 0.6           # Vehicle-car objects
-            - 0.45           # Vehicle-bus objects
-            - 0.45           # Vehicle-truck objects
-            - 0.5           # Vehicle-train objects
-            - 0.40          # Traffic light objects            
-            - 0.55          # Traffic sign objects
-        track_frame_rate:   30          # Frame rate for tracking
-        track_buffer:       30          # Buffer size for lost tracks
+            - 0.40    # all
+            - 0.45    # pedestrian
+            - 0.45    # cyclist
+            - 0.60    # car
+            - 0.45    # bus
+            - 0.45    # truck
+            - 0.50    # train
+            - 0.40    # traffic light
+            - 0.55    # traffic sign
+            - 0.45    # bike (rider-less)
+        track_frame_rate:   30
+        track_buffer:       30
 
 classify:
     ros__parameters:
-        model:               "classify.engine"
-        labels:              "labels_classify.txt"
+        model:      "classify.engine"
+        labels:     "labels_classify.txt"
         thresholds:
-            - 0.30           # Traffic Light objects
-            - 0.75           # Traffic Sign objects
+            - 0.30    # traffic light
+            - 0.75    # traffic sign
 
 lanedet:
     ros__parameters:
-        model:              "lane_detect.engine"
+        model:      "lane_detect.engine"
 
 gui:
     ros__parameters:
-        enable_3d_boxes:    false       # Draw 3D wireframe boxes using stereo depth
+        enable_3d_boxes: false   # 3D wireframe boxes via stereo depth
 
 bev:
     ros__parameters:
-        bev_width:              480
-        bev_height:             360
-        pixels_per_meter:       10.0        # 10 px/m = ~48m x 36m visible range
-        max_bev_range_m:        40.0        # Max depth to include in BEV
-        camera_height_m:        1.2         # Camera mount height for flat ground assumption
-        map_retention_sec:      30.0        # How long accumulated map points persist
-        max_map_points:         10000       # Ring buffer capacity
-        enable_ground_plane:    false       # Sparse depth ground plane sampling
-        render_rate_hz:         10          # BEV rendering frequency
-        gyro_alpha:             0.98        # Complementary filter: gyro vs GPS heading weight
+        bev_width:           480
+        bev_height:          360
+        pixels_per_meter:    10.0   # 10 px/m → ~48×36 m visible
+        max_bev_range_m:     40.0
+        camera_height_m:     1.2    # mount height (flat ground assumption)
+        map_retention_sec:   30.0
+        max_map_points:      10000
+        enable_ground_plane: false
+        render_rate_hz:      10
+        gyro_alpha:          0.98   # complementary filter: gyro vs GPS heading
 
 driver_monitor:
     ros__parameters:
-        face_engine:        "/home/jetson/VisionSense/src/graphs/face-detection/yolov11n-facefp16.engine"
-        gaze_engine:        "/home/jetson/VisionSense/src/graphs/gaze-estimation/resnet18_gaze_fp16.engine"
-        camera_topic:       "/camera/raw"
-        confidence:         0.5
-
+        face_engine:  "/home/jetson/VisionSense/src/graphs/face-detection/yolov11n-facefp16.engine"
+        gaze_engine:  "/home/jetson/VisionSense/src/graphs/gaze-estimation/resnet18_gaze_fp16.engine"
+        camera_topic: "/camera/raw"
+        confidence:   0.5

@@ -355,18 +355,29 @@ void lanes_callback(const visionconnect::msg::Lanes::SharedPtr input) {
 
 int main(int argc, char **argv) {
     ROS_CREATE_NODE("adas");
-    
+
     std::string package_share_directory = ament_index_cpp::get_package_share_directory("visionconnect");
-    
-    // Set image dimensions based on camera resolution (from config)
-    ldw_processor.setImageDimensions(1920, 1080);
-    
+
+    // Image dimensions of the frame lanedet was given (= main_eye stereo crop:
+    // 1440x900 when rotated_lenses=false, 1200x1200 when true). Lane points in
+    // /lanedet/lanes are in that pixel space; normalizing with the wrong
+    // resolution distorts the slope (aspect-ratio mismatch) and extrapolation
+    // endpoints, producing visibly tilted lane regions downstream.
+    int image_width  = 1440;
+    int image_height = 900;
+    ROS_DECLARE_PARAMETER("image_width",  image_width);
+    ROS_DECLARE_PARAMETER("image_height", image_height);
+    ROS_GET_PARAMETER("image_width",  image_width);
+    ROS_GET_PARAMETER("image_height", image_height);
+    ldw_processor.setImageDimensions(image_width, image_height);
+    ROS_INFO("ADAS image dimensions: %dx%d", image_width, image_height);
+
     // Create subscribers and publishers
     auto lanes_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Lanes, "lanes_in", 1, lanes_callback);
     ROS_CREATE_PUBLISHER(visionconnect::msg::ADAS, "adas_alerts", 5, adas_pub);
-    
+
     ROS_INFO("ADAS Node initialized, monitoring for lane departure");
     ROS_SPIN();
-    
+
     return 0;
 }

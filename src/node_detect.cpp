@@ -15,9 +15,22 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 
 Engine *engine;
-#define NMS_THRESH 0.5
 #define BATCH_SIZE 1
+#define MAX_PUBLISH_DETS 100
 float m_ratio = 1;
+
+// YOLO26 engine class IDs -> legacy class IDs used by downstream nodes
+// (gui/bev/classify). bike is a new legacy slot (8).
+//   0 car          -> 2 vehicle-car
+//   1 truck        -> 4 vehicle-truck
+//   2 bus          -> 3 vehicle-bus
+//   3 train        -> 5 train
+//   4 bike         -> 8 bike (NEW class slot)
+//   5 cyclist      -> 1 cyclist
+//   6 person       -> 0 pedestrian
+//   7 traffic_light -> 6 traffic light
+//   8 traffic_sign -> 7 traffic sign
+static const int kYolo26ToLegacy[9] = {2, 4, 3, 5, 8, 1, 0, 6, 7};
 Publisher<visionconnect::msg::Detect> detect_pub = NULL;
 Publisher<visionconnect::msg::Signs> signs_pub = NULL;
 Publisher<visionconnect::msg::Track> track_pub = NULL;
@@ -39,9 +52,10 @@ std::map<int, std::string> class_to_name = {
     {1, "cyclist"},   // cyclist
     {2, "car"},       // vehicle-car
     {3, "bus"},       // vehicle-bus
-    {4, "truck"}      // vehicle-truck
+    {4, "truck"},     // vehicle-truck
+    {8, "bike"}       // bike (rider-less)
 };
-std::set<int> tracked_classes = {0, 1, 2, 3, 4}; // Only track these classes
+std::set<int> tracked_classes = {0, 1, 2, 3, 4, 8}; // Only track these classes
 std::map<int, std::string> track_id_to_custom_name;
 
 std::vector<cv::Scalar> colors = {
@@ -52,7 +66,8 @@ std::vector<cv::Scalar> colors = {
     cv::Scalar(100, 10, 240), //truck
     cv::Scalar(240, 130, 10), //train
     cv::Scalar(160, 90, 160), //traffic light
-    cv::Scalar(120, 55, 70)   //traffic sign
+    cv::Scalar(120, 55, 70),  //traffic sign
+    cv::Scalar(180, 240, 90)  //bike
 };
 
 // Helper function to generate custom track name
@@ -94,208 +109,145 @@ void reset_tracking_if_needed() {
 
 void postprocess(std::vector<float> &featureVector, const std::vector<nvinfer1::Dims> &outputDims, cv::Mat &img)
 {
-    std::vector<cv::Rect> bboxes;
-    std::vector<float> scores;
-    std::vector<int> labels;
-    std::vector<int> indices;
     visionconnect::msg::Box detect_box;
     visionconnect::msg::Detect detect_msg;
     visionconnect::msg::Signs classifier_msg;
-    
+
     // Shrink and send input feed to output stream
     cv::Mat output;
     cv::resize(img, output, img.size() / 3);
 
-    std::string labelTxt;
-    auto numChannels = outputDims[0].d[1];
-    auto numAnchors = outputDims[0].d[2];
-    auto numClasses = classes.size();
+    // YOLO26 end2end (NMS-free) output: [batch, max_dets, 6] where each row is
+    // [x1, y1, x2, y2, score, class_id] in the letterboxed input image space.
+    // The model already deduplicates via the one-to-one head, so no NMS here.
+    const int numDetections = outputDims[0].d[1];   // 300
+    const int numFeatures   = outputDims[0].d[2];   // 6
 
-    float m_imgHeight = img.rows;
-    float m_imgWidth = img.cols;
+    const float m_imgHeight = static_cast<float>(img.rows);
+    const float m_imgWidth  = static_cast<float>(img.cols);
 
-    cv::Mat out = cv::Mat(numChannels, numAnchors, CV_32F, featureVector.data());
-    out = out.t();
-    int counter = 0;
+    std::vector<cv::Rect> bboxes;
+    std::vector<float>    scores;
+    std::vector<int>      labels;
+    bboxes.reserve(numDetections);
+    scores.reserve(numDetections);
+    labels.reserve(numDetections);
 
-    for (int i = 0; i < numAnchors; i++)
+    for (int i = 0; i < numDetections; i++)
     {
+        const float* row = featureVector.data() + i * numFeatures;
+        const float score = row[4];
+        if (score <= static_cast<float>(THRS[0])) continue;
 
-        auto rowPtr = out.row(i).ptr<float>();
-        auto bboxesPtr = rowPtr;
-        auto scoresPtr = rowPtr + 4;
-        auto maxSPtr = std::max_element(scoresPtr, scoresPtr + numClasses);
-        float score = *maxSPtr;
-        if (score > THRS[0])
-        {
-            counter++;
+        const int engine_cls = static_cast<int>(row[5]);
+        if (engine_cls < 0 || engine_cls >= 9) continue;
+        const int label = kYolo26ToLegacy[engine_cls];
+        if (label < 0) continue;
 
-            if (counter > 99)
-                continue;
-            float x = *bboxesPtr++;
-            float y = *bboxesPtr++;
-            float w = *bboxesPtr++;
-            float h = *bboxesPtr;
+        const float x0 = std::clamp(row[0] * m_ratio, 0.f, m_imgWidth);
+        const float y0 = std::clamp(row[1] * m_ratio, 0.f, m_imgHeight);
+        const float x1 = std::clamp(row[2] * m_ratio, 0.f, m_imgWidth);
+        const float y1 = std::clamp(row[3] * m_ratio, 0.f, m_imgHeight);
 
-            float x0 = std::clamp((x - 0.5f * w) * m_ratio, 0.f, m_imgWidth);
-            float y0 = std::clamp((y - 0.5f * h) * m_ratio, 0.f, m_imgHeight);
-            float x1 = std::clamp((x + 0.5f * w) * m_ratio, 0.f, m_imgWidth);
-            float y1 = std::clamp((y + 0.5f * h) * m_ratio, 0.f, m_imgHeight);
+        cv::Rect_<float> bbox;
+        bbox.x = x0;
+        bbox.y = y0;
+        bbox.width  = (x1 - x0);
+        bbox.height = (y1 - y0);
+        if (bbox.width <= 0.f || bbox.height <= 0.f) continue;
 
-            int label = maxSPtr - scoresPtr;
+        bboxes.push_back(bbox);
+        labels.push_back(label);
+        scores.push_back(score);
 
-            cv::Rect_<float> bbox;
-            bbox.x = x0;
-            bbox.y = y0;
-            bbox.width = (x1 - x0);
-            bbox.height = (y1 - y0);
-
-            bboxes.push_back(bbox);
-            labels.push_back(label);
-            scores.push_back(score);
-        }
-    }
-    // Custom NMS implementation to avoid OpenCV DNN dependency
-    // Group boxes by class and apply NMS per class
-    std::map<int, std::vector<int>> class_indices;
-    for (size_t i = 0; i < labels.size(); i++) {
-        class_indices[labels[i]].push_back(i);
-    }
-    
-    // Custom NMS function
-    auto computeIOU = [](const cv::Rect& a, const cv::Rect& b) -> float {
-        float xA = std::max(a.x, b.x);
-        float yA = std::max(a.y, b.y);
-        float xB = std::min(a.x + a.width, b.x + b.width);
-        float yB = std::min(a.y + a.height, b.y + b.height);
-        
-        float interArea = std::max(0.0f, xB - xA) * std::max(0.0f, yB - yA);
-        float boxAArea = a.width * a.height;
-        float boxBArea = b.width * b.height;
-        
-        return interArea / (boxAArea + boxBArea - interArea);
-    };
-    
-    for (auto& [class_id, class_idx] : class_indices) {
-        // Sort by score
-        std::sort(class_idx.begin(), class_idx.end(), 
-                  [&scores](int a, int b) { return scores[a] > scores[b]; });
-        
-        std::vector<bool> suppressed(class_idx.size(), false);
-        
-        for (size_t i = 0; i < class_idx.size(); i++) {
-            if (suppressed[i]) continue;
-            
-            indices.push_back(class_idx[i]);
-            
-            for (size_t j = i + 1; j < class_idx.size(); j++) {
-                if (suppressed[j]) continue;
-                
-                float iou = computeIOU(bboxes[class_idx[i]], bboxes[class_idx[j]]);
-                if (iou > NMS_THRESH) {
-                    suppressed[j] = true;
-                }
-            }
-        }
+        // Detect/Track ROS msgs use fixed 100-slot arrays — cap here to avoid OOB.
+        if (static_cast<int>(bboxes.size()) >= MAX_PUBLISH_DETS) break;
     }
 
     // Reset tracking counters if needed
     reset_tracking_if_needed();
-    
+
     // Convert detections to Object format for tracking - only tracked classes
     std::vector<Object> objects;
-    for (auto &index : indices)
+    for (size_t k = 0; k < bboxes.size(); k++)
     {
-        // Only track specified object classes
-        if (tracked_classes.find(labels[index]) != tracked_classes.end()) {
+        if (tracked_classes.find(labels[k]) != tracked_classes.end()) {
             Object obj;
-            obj.rect = bboxes[index];
-            obj.label = labels[index];
-            obj.prob = scores[index];
+            obj.rect = bboxes[k];
+            obj.label = labels[k];
+            obj.prob = scores[k];
             obj.tracker_id = -1;
             objects.push_back(obj);
         }
     }
-    
+
     // Run tracking
     std::vector<STrack> tracked_objects;
     if (tracker) {
         tracked_objects = tracker->update(objects);
     }
-    
+
     // Prepare track message
     visionconnect::msg::Track track_msg;
     track_msg.num_tracked = 0;
-    
+
     // Initialize track_ids array with empty strings
     for (int k = 0; k < 100; k++) {
         track_msg.track_ids[k] = "";
         detect_msg.track_list[k] = "";
     }
-    
+
     int i = 0;
-    for (auto &index : indices)
+    for (size_t k = 0; k < bboxes.size(); k++)
     {
-        // Copy raw detect to ROS message
-        detect_msg.classes[i] = labels[index];
-        detect_msg.scores[i] = scores[index];
-        
+        detect_msg.classes[i] = labels[k];
+        detect_msg.scores[i]  = scores[k];
+
         // Find corresponding tracked object for this detection (only for tracked classes)
         std::string custom_track_id = "";
-        if (tracked_classes.find(labels[index]) != tracked_classes.end()) {
+        if (tracked_classes.find(labels[k]) != tracked_classes.end()) {
             for (const auto& track : tracked_objects) {
-                if (track.label == labels[index] && 
-                    std::abs(track.tlbr[0] - bboxes[index].x) < 100 &&
-                    std::abs(track.tlbr[1] - bboxes[index].y) < 100) {
-                    custom_track_id = generate_custom_track_name(labels[index], track.track_id);
+                if (track.label == labels[k] &&
+                    std::abs(track.tlbr[0] - bboxes[k].x) < 100 &&
+                    std::abs(track.tlbr[1] - bboxes[k].y) < 100) {
+                    custom_track_id = generate_custom_track_name(labels[k], track.track_id);
                     break;
                 }
             }
         }
-        
         detect_msg.track_list[i] = custom_track_id;
 
         detect_box.data = {
-            static_cast<signed short>(bboxes[index].x),
-            static_cast<signed short>(bboxes[index].y),
-            static_cast<signed short>(bboxes[index].width),
-            static_cast<signed short>(bboxes[index].height)
+            static_cast<signed short>(bboxes[k].x),
+            static_cast<signed short>(bboxes[k].y),
+            static_cast<signed short>(bboxes[k].width),
+            static_cast<signed short>(bboxes[k].height)
         };
         detect_msg.boxes[i] = detect_box;
 
-        // Sign or Light detected
-        if (labels[index] == 6 || labels[index] == 7)
+        // Sign or Light detected -> forward crop to classifier
+        if (labels[k] == 6 || labels[k] == 7)
         {
-            // Crop and convert through ROS
             sensor_msgs::msg::Image msgClassifyImg;
-
-            convert_frame_to_message(img(bboxes[index]), msgClassifyImg);
-            msgClassifyImg.encoding = current_image_encoding;  // Preserve input encoding
+            convert_frame_to_message(img(bboxes[k]), msgClassifyImg);
+            msgClassifyImg.encoding = current_image_encoding;
             classifier_msg.images.push_back(msgClassifyImg);
-            classifier_msg.classes.push_back(labels[index]);
-            classifier_msg.scores.push_back(scores[index]);
+            classifier_msg.classes.push_back(labels[k]);
+            classifier_msg.scores.push_back(scores[k]);
             classifier_msg.boxes.push_back(detect_box);
         }
 
-        // Box drawing handled by GUI node — skip here to avoid duplicate/miscolored boxes
-        
-        // Track ID drawing disabled - only GUI node draws labels
-        // if (!custom_track_id.empty()) {
-        //     cv::putText(output, custom_track_id, 
-        //                cv::Point(bbox.x, bbox.y - 5), cv::FONT_HERSHEY_SIMPLEX, 0.5, colors[(int)labels[index]], 1);
-        // }
-
         i++;
     }
-    
+
     // Fill track message with current tracked objects (only tracked classes)
     int track_idx = 0;
     for (const auto& track : tracked_objects) {
-        if (track.is_activated && track_idx < 100 && 
+        if (track.is_activated && track_idx < 100 &&
             tracked_classes.find(track.label) != tracked_classes.end()) {
             track_msg.classes[track_idx] = track.label;
             track_msg.track_ids[track_idx] = generate_custom_track_name(track.label, track.track_id);
-            
+
             visionconnect::msg::Box track_box;
             track_box.data = {
                 static_cast<signed short>(track.tlbr[0]),
@@ -313,12 +265,10 @@ void postprocess(std::vector<float> &featureVector, const std::vector<nvinfer1::
     sensor_msgs::msg::Image msg;
     msg.header.stamp = ROS_TIME_NOW();
 
-    // Convert output image to ROS message and preserve input encoding
     convert_frame_to_message(output, msg);
-    msg.encoding = current_image_encoding;  // Use same encoding as input (rgb8 or bgr8)
+    msg.encoding = current_image_encoding;
     detect_msg.image = msg;
 
-    // Publish the messages
     detect_pub->publish(detect_msg);
     signs_pub->publish(classifier_msg);
     track_pub->publish(track_msg);

@@ -14,15 +14,102 @@
 #include <sensor_msgs/msg/nav_sat_status.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <opencv2/videoio.hpp>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <ctime>
+#include <deque>
 #include <iomanip>
 #include <sstream>
 #include <numeric>
+#include <thread>
 #ifdef Success
 #undef Success  // X11 defines 'Success' which conflicts with Eigen
 #endif
 #include <Eigen/Dense>
+
+// Background MP4 writer: callers push frames from the display loop; a worker
+// thread does the actual encode. The queue is bounded and drops on overflow so
+// the display loop is never blocked by a slow disk or codec.
+class FrameRecorder {
+public:
+    FrameRecorder() = default;
+    ~FrameRecorder() { stop(); }
+
+    void configure(const std::string& path, int fps) {
+        path_ = path;
+        fps_  = fps > 0 ? fps : 30;
+    }
+
+    // Open the writer once we know the frame size and start the worker.
+    bool open(const cv::Size& size) {
+        int fourcc = cv::VideoWriter::fourcc('m', 'p', '4', 'v');
+        if (!writer_.open(path_, fourcc, fps_, size, /*isColor=*/true)) {
+            return false;
+        }
+        running_ = true;
+        worker_  = std::thread(&FrameRecorder::run, this);
+        return true;
+    }
+
+    bool is_open() const { return writer_.isOpened(); }
+
+    // Non-blocking enqueue. Drops the frame if the queue is already full so the
+    // 30 Hz display callback never stalls on disk I/O.
+    void push(const cv::Mat& frame) {
+        if (!running_) return;
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            if (q_.size() >= kMaxQueue) {
+                ++dropped_;
+                return;
+            }
+            q_.emplace_back(frame.clone());
+        }
+        cv_.notify_one();
+    }
+
+    void stop() {
+        if (!running_.exchange(false)) return;
+        cv_.notify_all();
+        if (worker_.joinable()) worker_.join();
+        if (writer_.isOpened()) writer_.release();
+    }
+
+    size_t dropped() const { return dropped_.load(); }
+    const std::string& path() const { return path_; }
+
+private:
+    void run() {
+        while (true) {
+            cv::Mat frame;
+            {
+                std::unique_lock<std::mutex> lk(m_);
+                cv_.wait(lk, [&] { return !q_.empty() || !running_; });
+                if (!running_ && q_.empty()) break;
+                frame = std::move(q_.front());
+                q_.pop_front();
+            }
+            writer_.write(frame);
+        }
+    }
+
+    static constexpr size_t kMaxQueue = 4;
+    std::string                 path_;
+    int                         fps_ = 30;
+    cv::VideoWriter             writer_;
+    std::thread                 worker_;
+    std::mutex                  m_;
+    std::condition_variable     cv_;
+    std::deque<cv::Mat>         q_;
+    std::atomic<bool>           running_{false};
+    std::atomic<size_t>         dropped_{0};
+};
+
+static FrameRecorder g_recorder;
+static bool          g_record_enabled = false;
 
 visionconnect::msg::Detect::SharedPtr detect_msg = NULL;
 visionconnect::msg::Signs::SharedPtr signs_msg = NULL;
@@ -31,6 +118,11 @@ visionconnect::msg::ADAS::SharedPtr adas_msg = NULL;
 
 int screen_width = 1920;
 int screen_height = 1080;
+
+// When false, the gui node still publishes /gui/fusion (for the web
+// dashboard) but skips creating the native cv::imshow window. Driven by the
+// `display` ROS parameter, which defaults to true to preserve legacy behavior.
+static bool g_display_enabled = true;
 
 // Additional data streams for enhanced GUI
 cv::Mat driver_monitor_image;
@@ -62,7 +154,8 @@ constexpr float CAM_CX = 600.0f;
 constexpr float CAM_CY = 600.0f;
 
 // Class-based size priors {length, width, height} in meters
-// Index: 0=pedestrian, 1=cyclist, 2=car, 3=bus, 4=truck, 5=train
+// Index: 0=pedestrian, 1=cyclist, 2=car, 3=bus, 4=truck, 5=train,
+//        6=traffic light (placeholder), 7=traffic sign (placeholder), 8=bike
 struct SizePrior { float length, width, height; };
 constexpr SizePrior SIZE_PRIORS[] = {
     {0.5f, 0.5f, 1.7f},   // pedestrian
@@ -71,7 +164,11 @@ constexpr SizePrior SIZE_PRIORS[] = {
     {12.0f, 2.6f, 3.5f},  // bus
     {8.0f, 2.5f, 3.0f},   // truck
     {15.0f, 3.0f, 4.0f},  // train
+    {0.3f, 0.3f, 0.6f},   // traffic light (placeholder, not drawn in 3D)
+    {0.5f, 0.5f, 0.6f},   // traffic sign  (placeholder, not drawn in 3D)
+    {1.8f, 0.7f, 1.1f},   // bike (rider-less bicycle footprint)
 };
+static constexpr int NUM_SIZE_PRIORS = sizeof(SIZE_PRIORS) / sizeof(SIZE_PRIORS[0]);
 
 struct OrientedBox3D {
     float cx, cy, cz;           // 3D center in camera frame (meters)
@@ -131,13 +228,14 @@ cv::Mat createSummaryPanel(int width, int height)
                 cv::FONT_HERSHEY_SIMPLEX, 0.55, title_color, 1);
     col1_y += line_height;
 
-    int num_vehicles = 0, num_pedestrians = 0, num_cyclists = 0;
+    int num_vehicles = 0, num_pedestrians = 0, num_cyclists = 0, num_bikes = 0;
     if (detect_msg != NULL) {
         for (uint16_t i = 0; i < detect_msg->num_detections; ++i) {
             int cls = static_cast<int>(detect_msg->classes[i]);
             if (cls >= 2 && cls <= 4) num_vehicles++;
             else if (cls == 0) num_pedestrians++;
             else if (cls == 1) num_cyclists++;
+            else if (cls == 8) num_bikes++;
         }
     }
 
@@ -147,6 +245,10 @@ cv::Mat createSummaryPanel(int width, int height)
     col1_y += line_height;
 
     snprintf(text, sizeof(text), "Pedestrians: %d", num_pedestrians);
+    cv::putText(panel, text, cv::Point(col1_x, col1_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
+    col1_y += line_height;
+
+    snprintf(text, sizeof(text), "Bikes: %d", num_bikes);
     cv::putText(panel, text, cv::Point(col1_x, col1_y), cv::FONT_HERSHEY_SIMPLEX, 0.5, data_color, 1);
     col1_y += line_height;
 
@@ -208,13 +310,14 @@ void drawStatusOverlay(cv::Mat& img)
     if (img.empty()) return;
 
     // --- Gather data ---
-    int nv = 0, np = 0, nc = 0;
+    int nv = 0, np = 0, nc = 0, nb = 0;
     if (detect_msg != NULL) {
         for (uint16_t i = 0; i < detect_msg->num_detections; ++i) {
             int cls = static_cast<int>(detect_msg->classes[i]);
             if (cls >= 2 && cls <= 4) nv++;
             else if (cls == 0) np++;
             else if (cls == 1) nc++;
+            else if (cls == 8) nb++;
         }
     }
     int nl = (lanes_msg != NULL) ? lanes_msg->num_lanes : 0;
@@ -276,6 +379,13 @@ void drawStatusOverlay(cv::Mat& img)
     cv::putText(img, text, cv::Point(tx, ty), font, fs, cv::Scalar(255, 200, 100), 1, cv::LINE_AA);
     tw = cv::getTextSize(text, font, fs, 1, nullptr).width;
     cv::putText(img, "C", cv::Point(tx + tw + 1, ty), font, fs * 0.85, col_label, 1, cv::LINE_AA);
+    tx += tw + 14;
+
+    // Bike count (light green)
+    snprintf(text, sizeof(text), "%d", nb);
+    cv::putText(img, text, cv::Point(tx, ty), font, fs, cv::Scalar(180, 240, 90), 1, cv::LINE_AA);
+    tw = cv::getTextSize(text, font, fs, 1, nullptr).width;
+    cv::putText(img, "B", cv::Point(tx + tw + 1, ty), font, fs * 0.85, col_label, 1, cv::LINE_AA);
     tx += tw + 18;
 
     // Separator dot
@@ -574,59 +684,167 @@ void publishSceneData() {
     scene_pub->publish(scene_data);
 }
 
+// Filled / outlined rounded rectangle. OpenCV doesn't ship one; we build it
+// from a cross of axis-aligned rects + 4 corner pieces (circles for fill,
+// 90° arcs for outline). Used by the lane-departure HUD banner.
+static void drawRoundedRect(cv::Mat& img, cv::Rect r, int radius,
+                            cv::Scalar color, int thickness)
+{
+    radius = std::max(0, std::min(radius, std::min(r.width, r.height) / 2));
+    if (thickness < 0) {
+        cv::rectangle(img, cv::Rect(r.x + radius, r.y, r.width - 2*radius, r.height),
+                      color, -1, cv::LINE_AA);
+        cv::rectangle(img, cv::Rect(r.x, r.y + radius, r.width, r.height - 2*radius),
+                      color, -1, cv::LINE_AA);
+        cv::circle(img, cv::Point(r.x + radius,             r.y + radius),             radius, color, -1, cv::LINE_AA);
+        cv::circle(img, cv::Point(r.x + r.width - radius-1, r.y + radius),             radius, color, -1, cv::LINE_AA);
+        cv::circle(img, cv::Point(r.x + radius,             r.y + r.height - radius-1), radius, color, -1, cv::LINE_AA);
+        cv::circle(img, cv::Point(r.x + r.width - radius-1, r.y + r.height - radius-1), radius, color, -1, cv::LINE_AA);
+    } else {
+        cv::line(img, cv::Point(r.x + radius,             r.y),                 cv::Point(r.x + r.width - radius-1, r.y),                 color, thickness, cv::LINE_AA);
+        cv::line(img, cv::Point(r.x + radius,             r.y + r.height-1),    cv::Point(r.x + r.width - radius-1, r.y + r.height-1),    color, thickness, cv::LINE_AA);
+        cv::line(img, cv::Point(r.x,                      r.y + radius),        cv::Point(r.x,                      r.y + r.height - radius-1), color, thickness, cv::LINE_AA);
+        cv::line(img, cv::Point(r.x + r.width-1,          r.y + radius),        cv::Point(r.x + r.width-1,          r.y + r.height - radius-1), color, thickness, cv::LINE_AA);
+        cv::ellipse(img, cv::Point(r.x + radius,             r.y + radius),             cv::Size(radius, radius), 180, 0, 90, color, thickness, cv::LINE_AA);
+        cv::ellipse(img, cv::Point(r.x + r.width - radius-1, r.y + radius),             cv::Size(radius, radius), 270, 0, 90, color, thickness, cv::LINE_AA);
+        cv::ellipse(img, cv::Point(r.x + radius,             r.y + r.height - radius-1), cv::Size(radius, radius),  90, 0, 90, color, thickness, cv::LINE_AA);
+        cv::ellipse(img, cv::Point(r.x + r.width - radius-1, r.y + r.height - radius-1), cv::Size(radius, radius),   0, 0, 90, color, thickness, cv::LINE_AA);
+    }
+}
+
+// HUD-style lane-departure badge. direction: -1=left (rendered top-left),
+// +1=right (rendered top-right). Compact rounded pill with a chevron on the
+// departure side and "LANE DEPARTURE" next to it.
+static void drawLaneDepartureBanner(cv::Mat& image, int direction)
+{
+    if (direction == 0) return;
+
+    const int W = image.cols;
+    const int H = image.rows;
+
+    // Compact badge — scales with frame, clamped tight.
+    const int bw = std::clamp(static_cast<int>(W * 0.17f), 180, 300);
+    const int bh = std::clamp(static_cast<int>(H * 0.05f), 36, 54);
+    const int margin = std::max(10, static_cast<int>(H * 0.018f));
+    const int bx = (direction < 0) ? margin : (W - bw - margin);
+    const int by = margin;
+    const cv::Rect rect(bx, by, bw, bh);
+    const int radius = bh / 3;
+
+    // Vivid crimson — distinct from the amber used elsewhere and reads as
+    // "warning" at a glance. BGR for ~#F03250.
+    const cv::Scalar warn(80, 50, 240);
+    const cv::Scalar warn_dim(60, 35, 175);
+    const cv::Scalar white(245, 245, 245);
+    const cv::Scalar bg_dark(20, 20, 25);
+
+    // Translucent dark backdrop — blend only the badge ROI.
+    const cv::Rect roi = rect & cv::Rect(0, 0, W, H);
+    if (roi.width > 0 && roi.height > 0) {
+        cv::Mat band = image(roi).clone();
+        cv::Mat filled = band.clone();
+        drawRoundedRect(filled, cv::Rect(rect.x - roi.x, rect.y - roi.y, rect.width, rect.height),
+                        radius, bg_dark, -1);
+        cv::addWeighted(filled, 0.78, band, 0.22, 0, image(roi));
+    }
+
+    // Crimson border + thin inner highlight for depth.
+    drawRoundedRect(image, rect, radius, warn, 2);
+    drawRoundedRect(image, cv::Rect(rect.x + 3, rect.y + 3, rect.width - 6, rect.height - 6),
+                    std::max(1, radius - 2), warn_dim, 1);
+
+    // Chevron on the departure side (matches the badge's screen-edge anchor).
+    const int arrow_w = bh / 2;
+    const int arrow_h = static_cast<int>(bh * 0.55f);
+    const int arrow_cy = by + bh / 2;
+    const int side_pad = bh / 3;
+    const int arrow_cx = (direction < 0)
+        ? bx + side_pad + arrow_w / 2
+        : bx + bw - side_pad - arrow_w / 2;
+    std::vector<cv::Point> chev;
+    if (direction < 0) {
+        chev = {
+            cv::Point(arrow_cx - arrow_w / 2, arrow_cy),
+            cv::Point(arrow_cx + arrow_w / 2, arrow_cy - arrow_h / 2),
+            cv::Point(arrow_cx + arrow_w / 2, arrow_cy + arrow_h / 2),
+        };
+    } else {
+        chev = {
+            cv::Point(arrow_cx + arrow_w / 2, arrow_cy),
+            cv::Point(arrow_cx - arrow_w / 2, arrow_cy - arrow_h / 2),
+            cv::Point(arrow_cx - arrow_w / 2, arrow_cy + arrow_h / 2),
+        };
+    }
+    cv::fillConvexPoly(image, chev, warn, cv::LINE_AA);
+
+    // "LANE DEPARTURE" — centered in the space not covered by the arrow.
+    const std::string text = "LANE DEPARTURE";
+    int thickness = 1;
+    double scale = bh * 0.012;
+    int baseline = 0;
+    cv::Size ts = cv::getTextSize(text, cv::FONT_HERSHEY_DUPLEX, scale, thickness, &baseline);
+    const int text_zone_x = (direction < 0) ? bx + side_pad * 2 + arrow_w : bx + side_pad;
+    const int text_zone_w = bw - (side_pad * 3 + arrow_w);
+    while (ts.width > text_zone_w && scale > 0.35) {
+        scale -= 0.04;
+        ts = cv::getTextSize(text, cv::FONT_HERSHEY_DUPLEX, scale, thickness, &baseline);
+    }
+    const int tx = text_zone_x + (text_zone_w - ts.width) / 2;
+    const int ty = by + (bh + ts.height) / 2 - 1;
+    cv::putText(image, text, cv::Point(tx, ty),
+                cv::FONT_HERSHEY_DUPLEX, scale, white, thickness, cv::LINE_AA);
+}
+
 void drawLaneChangeIndicator(cv::Mat &image)
 {
     if (adas_msg == NULL) {
         return;
     }
-    
+
     int img_width = image.cols;
     int img_height = image.rows;
-    
-    // Lane departure warnings at top
+
+    // Top-center HUD banner — replaces the old fixed-pos large yellow text.
     if (adas_msg->lane_change_left) {
-        cv::putText(image, "LANE DEPARTURE LEFT", cv::Point(50, 60), 
-                   cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 255), 2);
+        drawLaneDepartureBanner(image, -1);
+    } else if (adas_msg->lane_change_right) {
+        drawLaneDepartureBanner(image, +1);
     }
-    if (adas_msg->lane_change_right) {
-        cv::putText(image, "LANE DEPARTURE RIGHT", cv::Point(50, 60), 
-                   cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 255), 2);
-    }
-    
+
     // Use calibrated points directly from ADAS message (no recalculation)
     int bottom_y = img_height - 10;  // Position closer to actual bottom
-    
+
     // Convert normalized coordinates (0.0-1.0) to GUI display coordinates
     int calibrated_center_x = static_cast<int>(adas_msg->calibrated_camera_center_x * img_width);
     int lane_midpoint_x = static_cast<int>(adas_msg->current_lane_midpoint_x * img_width);
-    
+
     // Draw calibrated camera center (green vertical line) - aligned to bottom
-    cv::line(image, cv::Point(calibrated_center_x, bottom_y - 30), 
-             cv::Point(calibrated_center_x, bottom_y), cv::Scalar(0, 255, 0), 2);
-    
+    cv::line(image, cv::Point(calibrated_center_x, bottom_y - 30),
+             cv::Point(calibrated_center_x, bottom_y), cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+
     // Draw current lane midpoint (blue vertical line) - aligned to bottom
-    cv::line(image, cv::Point(lane_midpoint_x, bottom_y - 30), 
-             cv::Point(lane_midpoint_x, bottom_y), cv::Scalar(255, 0, 0), 2);
-    
+    cv::line(image, cv::Point(lane_midpoint_x, bottom_y - 30),
+             cv::Point(lane_midpoint_x, bottom_y), cv::Scalar(255, 0, 0), 2, cv::LINE_AA);
+
     // Draw deviation indicator line between the two points
-    cv::line(image, cv::Point(calibrated_center_x, bottom_y - 15), 
-             cv::Point(lane_midpoint_x, bottom_y - 15), cv::Scalar(255, 255, 0), 2);
-    
+    cv::line(image, cv::Point(calibrated_center_x, bottom_y - 15),
+             cv::Point(lane_midpoint_x, bottom_y - 15), cv::Scalar(255, 255, 0), 2, cv::LINE_AA);
+
     // Show deviation value positioned above the deviation indicator
     int deviation_percent = static_cast<int>(std::round(adas_msg->lane_center_offset * 100.0f));
     std::string deviation_text = std::to_string(deviation_percent) + "%";
-    
+
     // Position label at the center of the deviation indicator
     int label_x = (calibrated_center_x + lane_midpoint_x) / 2;
     int label_y = bottom_y - 40;
-    
+
     // Get text size to center it properly
     int baseline = 0;
-    cv::Size text_size = cv::getTextSize(deviation_text, cv::FONT_HERSHEY_SIMPLEX, 0.6, 2, &baseline);
+    cv::Size text_size = cv::getTextSize(deviation_text, cv::FONT_HERSHEY_SIMPLEX, 0.55, 1, &baseline);
     label_x -= text_size.width / 2;  // Center the text horizontally
-    
-    cv::putText(image, deviation_text, cv::Point(label_x, label_y), 
-               cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
+
+    cv::putText(image, deviation_text, cv::Point(label_x, label_y),
+               cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
 }
 
 // Extract median depth from the central region of a bounding box
@@ -677,7 +895,9 @@ OrientedBox3D estimate_frustum_3d_box(int bx, int by, int bw, int bh,
                                        const cv::Mat& depth_map, int cls)
 {
     OrientedBox3D result{};
-    if (depth_map.empty() || depth_map.type() != CV_32FC1 || cls < 0 || cls > 5)
+    // Only build a 3D box for physical road objects (skip traffic light/sign placeholders).
+    const bool physical = (cls >= 0 && cls <= 5) || cls == 8;
+    if (depth_map.empty() || depth_map.type() != CV_32FC1 || !physical || cls >= NUM_SIZE_PRIORS)
         return result;
 
     const SizePrior& prior = SIZE_PRIORS[cls];
@@ -894,7 +1114,8 @@ void fuse_data()
         cv::Scalar(100, 10, 240), //truck
         cv::Scalar(240, 130, 10), //train
         cv::Scalar(160, 90, 160), //traffic light
-        cv::Scalar(120, 55, 70)   //traffic sign
+        cv::Scalar(120, 55, 70),  //traffic sign
+        cv::Scalar(180, 240, 90)  //bike
     };
     cv::Mat img;
 
@@ -1077,10 +1298,15 @@ void fuse_data()
         int h = static_cast<int>(boxes[i].data[3]/3);
         int cls = static_cast<int>(classes[i]);
 
-        // --- Physical objects (classes 0-5): single pass 2D/3D ---
-        if (cls >= 0 && cls <= 5)
+        // --- Physical objects (classes 0-5, 8=bike): single pass 2D/3D ---
+        if ((cls >= 0 && cls <= 5) || cls == 8)
         {
-            const char* short_names[] = {"pedestrian", "cyclist", "car", "bus", "truck", "train"};
+            // Index aligns with legacy class slots (0..5 + 8); slots 6/7 are
+            // placeholders so direct indexing stays valid for bike at 8.
+            static const char* const short_names[] = {
+                "pedestrian", "cyclist", "car", "bus", "truck", "train",
+                "tlight", "tsign", "bike"
+            };
             if (!track_list[i].empty()) {
                 label = track_list[i] + " " + fmt_score(scores[i]);
             } else {
@@ -1368,8 +1594,10 @@ void fuse_data()
                 
                 // Analyze each detected vehicle
                 for (int i = 0; i < local_detect_msg->num_detections; i++) {
-                    // Only analyze tracked vehicle classes (cars, trucks, buses, pedestrians, cyclists)
-                    if (local_detect_msg->classes[i] >= 0 && local_detect_msg->classes[i] <= 4 && !local_detect_msg->track_list[i].empty()) {
+                    // Only analyze tracked road objects (pedestrians, cyclists, cars, buses, trucks, bikes)
+                    int det_cls = static_cast<int>(local_detect_msg->classes[i]);
+                    bool is_tracked_road_obj = (det_cls >= 0 && det_cls <= 4) || det_cls == 8;
+                    if (is_tracked_road_obj && !local_detect_msg->track_list[i].empty()) {
                         // Get vehicle bounding box (scaled coordinates)
                         int x = static_cast<int>(local_detect_msg->boxes[i].data[0]/3);
                         int y = static_cast<int>(local_detect_msg->boxes[i].data[1]/3);
@@ -1494,28 +1722,32 @@ void fuse_data()
         }
     }
 
-    // Draw ADAS indicators on top of everything
+    // Draw ADAS lane-change indicator (warning visual — keep on both
+    // dashboard and local display since it's safety-critical and not
+    // duplicated anywhere else).
     drawLaneChangeIndicator(img);
 
-    // Draw status overlay on main view (replaces bottom-right summary panel)
+    // Publish ONLY the main fused view — BEFORE the bottom status overlay
+    // (counts/GPS/IMU/driver). The web dashboard's header chips already
+    // surface that telemetry, so duplicating it inside the image is visual
+    // noise that also obscures pixels in the lower-left of the scene.
+    sensor_msgs::msg::Image msg;
+    msg.header.stamp = ROS_TIME_NOW();
+    convert_frame_to_message(img, msg);
+    gui_pub->publish(msg);
+
+    // Now add the status overlay for the local cv::imshow composite path.
+    // The dashboard never sees this version.
     drawStatusOverlay(img);
 
     // Publish scene data
     publishSceneData();
 
-    // Store main view for timer-based display refresh
+    // Store annotated main view for timer-based display refresh.
     {
         std::lock_guard<std::mutex> lock(main_view_mutex);
         last_main_view = img.clone();
     }
-
-    // Create composite display for ROS publishing
-    cv::Mat composite = createCompositeDisplay(img, screen_width, screen_height);
-
-    sensor_msgs::msg::Image msg;
-    msg.header.stamp = ROS_TIME_NOW();
-    convert_frame_to_message(composite, msg);
-    gui_pub->publish(msg);
     // Note: cv::imshow is handled by display_refresh_callback timer at 30 fps
 }
 
@@ -1783,10 +2015,31 @@ void display_refresh_callback()
         main_view = last_main_view;  // Shallow copy, fast
     }
 
-    // Create composite display with latest main view and depth
+    // Skip the (expensive) composite build entirely when the on-screen
+    // window is disabled — saves ~10ms/frame and frees a core for the rest
+    // of the stack. Recording also depends on the composite, so it implies
+    // display=true.
+    if (!g_display_enabled && !g_record_enabled) return;
+
     cv::Mat composite = createCompositeDisplay(main_view, screen_width, screen_height);
-    cv::imshow("Perception Fusion", composite);
-    cv::waitKey(1);
+    if (g_display_enabled) {
+        cv::imshow("Perception Fusion", composite);
+        cv::waitKey(1);
+    }
+
+    if (g_record_enabled) {
+        if (!g_recorder.is_open()) {
+            if (g_recorder.open(composite.size())) {
+                ROS_INFO("Recording fused view to %s (%dx%d)",
+                         g_recorder.path().c_str(), composite.cols, composite.rows);
+            } else {
+                ROS_ERROR("Failed to open recorder at %s — disabling recording",
+                          g_recorder.path().c_str());
+                g_record_enabled = false;
+            }
+        }
+        g_recorder.push(composite);
+    }
 }
 
 // node main loop
@@ -1839,14 +2092,53 @@ int main(int argc, char **argv)
         ROS_INFO("Screen resolution overridden by parameters: %dx%d", screen_width, screen_height);
     }
 
-    cv::namedWindow("Perception Fusion", cv::WINDOW_NORMAL);
-    cv::resizeWindow("Perception Fusion", screen_width, screen_height);
-    cv::setWindowProperty("Perception Fusion", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+    // `display` controls whether the on-screen GUI window is shown. When
+    // false, the gui node still publishes /gui/fusion for the web dashboard
+    // but skips namedWindow/imshow entirely.
+    node->declare_parameter("display", true);
+    node->get_parameter("display", g_display_enabled);
+    ROS_INFO("On-screen GUI window: %s", g_display_enabled ? "enabled" : "disabled");
+
+    if (g_display_enabled) {
+        cv::namedWindow("Perception Fusion", cv::WINDOW_NORMAL);
+        cv::resizeWindow("Perception Fusion", screen_width, screen_height);
+        cv::setWindowProperty("Perception Fusion", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+    }
 
     // Read 3D box config parameter
     node->declare_parameter("enable_3d_boxes", true);
     node->get_parameter("enable_3d_boxes", enable_3d_boxes);
     ROS_INFO("3D bounding boxes: %s", enable_3d_boxes ? "enabled" : "disabled");
+
+    // Recording config: writes the on-screen fused composite to MP4. The
+    // worker thread + dropping queue keep this off the display hot path.
+    node->declare_parameter("record", false);
+    node->declare_parameter("record_path", std::string(""));
+    node->declare_parameter("record_fps", 30);
+    bool record_enabled = false;
+    std::string record_path;
+    int record_fps = 30;
+    node->get_parameter("record", record_enabled);
+    node->get_parameter("record_path", record_path);
+    node->get_parameter("record_fps", record_fps);
+    if (record_enabled) {
+        if (record_path.empty()) {
+            std::time_t t = std::time(nullptr);
+            std::tm tm{}; localtime_r(&t, &tm);
+            char buf[64];
+            std::strftime(buf, sizeof(buf), "/tmp/visionsense_%Y%m%d-%H%M%S.mp4", &tm);
+            record_path = buf;
+        }
+        g_recorder.configure(record_path, record_fps);
+        g_record_enabled = true;
+        ROS_INFO("Recording requested: path=%s fps=%d", record_path.c_str(), record_fps);
+    }
+    rclcpp::on_shutdown([]() {
+        if (g_record_enabled) {
+            ROS_INFO("Finalizing recording (%zu frames dropped)", g_recorder.dropped());
+            g_recorder.stop();
+        }
+    });
 
     // Use BEST_EFFORT QoS for image subscribers to prevent back-pressure
     rclcpp::QoS qos_best_effort(1);
@@ -1890,8 +2182,12 @@ int main(int argc, char **argv)
     auto imu_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::Imu, "/imu_gps/imu/data", 2, imu_callback);
     auto gps_sub = ROS_CREATE_SUBSCRIBER(sensor_msgs::msg::NavSatFix, "/imu_gps/gps/fix", 2, gps_callback);
 
-    // Publish fusion image with BEST_EFFORT QoS
-    rclcpp::QoS qos_pub(2);
+    // Fusion publisher: BEST_EFFORT + VOLATILE + KEEP_LAST(1).
+    // Depth=1 matches the dashboard subscriber's depth and ensures
+    // latest-frame-wins semantics — a slow downstream cannot starve newer
+    // frames out of the queue. BEST_EFFORT skips retransmission (correct for
+    // video where stale frames are useless).
+    rclcpp::QoS qos_pub(rclcpp::KeepLast(1));
     qos_pub.best_effort();
     qos_pub.durability_volatile();
     gui_pub = node->create_publisher<sensor_msgs::Image>("fusion", qos_pub);

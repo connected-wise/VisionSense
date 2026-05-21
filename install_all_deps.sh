@@ -92,12 +92,14 @@ sudo apt install -y \
     gpsd-clients \
     libgps-dev \
     v4l-utils \
-    libopencv-dev
+    libopencv-dev \
+    libwebsockets-dev \
+    libyaml-cpp-dev
 
 echo -e "\n7. Verifying OpenCV..."
 # VisionSense uses the system OpenCV that ships with JetPack 6.2 (no CUDA
 # modules). The cv::cuda::* ops the older codebase relied on were replaced
-# with raw CUDA kernels in src/cuda/preprocess.cu and src/cuda/stereo_preproc.cu,
+# with raw CUDA kernels in src/cuda/preprocess.cu and src/cuda/stereo_rotate.cu,
 # so an OpenCV-from-source build is no longer required.
 if [ -f "/usr/include/opencv4/opencv2/core/version.hpp" ]; then
     OPENCV_VER=$(grep '#define CV_VERSION_' /usr/include/opencv4/opencv2/core/version.hpp \
@@ -315,7 +317,87 @@ else
     echo "Warning: Camera overlay source not found at $OVERLAY_SRC"
 fi
 
-echo -e "\n15. Verifying installations..."
+echo -e "\n15. Configuring kernel UDP buffers for Fast-DDS..."
+# A single 1200×1200×3 stereo image is 4.32 MB. With Fast-DDS LARGE_DATA mode
+# (used by launch_visionsense.sh) or any UDP fallback, this fragments into
+# ~67 UDP packets and immediately overflows the kernel's default ~208 KB
+# socket buffer — the symptom is /camera_stereo/right/image_raw dropping to
+# ~2 Hz while left holds 30 Hz. Bump rmem/wmem to 16 MB.
+FASTDDS_SYSCTL=/etc/sysctl.d/99-ros2-fastdds.conf
+DESIRED_SYSCTL_CONTENT=$(cat <<'SYSCTLCONF'
+# Larger UDP socket buffers for ROS2/Fast-DDS image streaming.
+# Default is 208 KB; a single 1200x1200x3 stereo image is 4.32 MB,
+# which fragments into ~67 UDP packets and overflows the default buffer.
+# Required for Fast-DDS LARGE_DATA mode (set in launch_visionsense.sh)
+# and any UDP-transport fallback.
+net.core.rmem_max = 16777216
+net.core.rmem_default = 16777216
+net.core.wmem_max = 16777216
+net.core.wmem_default = 16777216
+SYSCTLCONF
+)
+
+if [ -f "$FASTDDS_SYSCTL" ] && [ "$(cat "$FASTDDS_SYSCTL")" = "$DESIRED_SYSCTL_CONTENT" ]; then
+    echo "✓ $FASTDDS_SYSCTL already up to date"
+else
+    echo "Writing $FASTDDS_SYSCTL ..."
+    echo "$DESIRED_SYSCTL_CONTENT" | sudo tee "$FASTDDS_SYSCTL" > /dev/null
+    sudo sysctl --system > /dev/null 2>&1 || echo "  (sysctl --system reload failed; values will apply at next boot)"
+    echo "✓ Kernel UDP buffers set to 16 MB"
+fi
+
+echo -e "\n16. Configuring nvargus-daemon for clean camera teardown..."
+# Workaround for L4T R36.x bug where nvargus force-destroys the CameraProvider
+# after 1500 ms of pending requests on disconnect. That force-destruction leaks
+# vb2 buffers in the VI channel and wedges /dev/video0 until reboot. Setting
+# enableCamInfiniteTimeout=1 disables the timeout so the userspace shutdown
+# sequence finishes cleanly. See:
+# https://forums.developer.nvidia.com/t/imx219-camera-works-the-first-time-then-fails-thereafter/363291
+NVARGUS_DROPIN_DIR=/etc/systemd/system/nvargus-daemon.service.d
+sudo mkdir -p "$NVARGUS_DROPIN_DIR"
+sudo tee "$NVARGUS_DROPIN_DIR/override.conf" > /dev/null << 'NVARGUS_OVR'
+[Service]
+Environment="enableCamInfiniteTimeout=1"
+NVARGUS_OVR
+sudo systemctl daemon-reload
+sudo systemctl restart nvargus-daemon || echo "  (nvargus-daemon restart failed — continuing)"
+echo "✓ nvargus-daemon override installed"
+
+echo -e "\n17. Installing persistent IMX219 driver-monitor camera service..."
+# The Jetson Argus stack wedges on Producer close on this rig — every second
+# nvarguscamerasrc session fails until reboot (bare gst-launch reproduces it).
+# Workaround: keep one long-lived camera session alive for the whole uptime via
+# systemd, and have VisionSense subscribe to /camera/raw as a normal ROS topic
+# instead of opening Argus itself. Stopping/starting VisionSense never touches
+# the camera. See scripts/visionsense-imx219.service for the unit and
+# scripts/imx219-csi-warmup.sh for the boot-time Arducam V4L2 warmup that keeps
+# Argus' sensor-1 probe from poisoning IMX219 capture on fresh boot.
+IMX219_UNIT_SRC="${SCRIPT_DIR}/scripts/visionsense-imx219.service"
+IMX219_UNIT_DST=/etc/systemd/system/visionsense-imx219.service
+IMX219_WARMUP_SRC="${SCRIPT_DIR}/scripts/imx219-csi-warmup.sh"
+if [ -f "$IMX219_UNIT_SRC" ] && [ -f "$IMX219_WARMUP_SRC" ]; then
+    sudo install -m 0644 "$IMX219_UNIT_SRC" "$IMX219_UNIT_DST"
+    sudo chmod +x "$IMX219_WARMUP_SRC"
+    sudo systemctl daemon-reload
+    sudo systemctl enable visionsense-imx219.service || true
+    echo "✓ visionsense-imx219.service installed and enabled (starts at next boot)"
+    # Passwordless sudo for the launch script's re-kick of this one unit.
+    SUDOERS_SRC="${SCRIPT_DIR}/scripts/sudoers.visionsense-imx219"
+    SUDOERS_DST=/etc/sudoers.d/visionsense-imx219
+    if [ -f "$SUDOERS_SRC" ]; then
+        sudo install -m 0440 -o root -g root "$SUDOERS_SRC" "$SUDOERS_DST"
+        if sudo visudo -c -f "$SUDOERS_DST" >/dev/null 2>&1; then
+            echo "✓ /etc/sudoers.d/visionsense-imx219 installed (passwordless re-kick)"
+        else
+            sudo rm -f "$SUDOERS_DST"
+            echo "✗ sudoers file failed visudo -c — removed; launch script will prompt for password"
+        fi
+    fi
+else
+    echo "  (scripts/visionsense-imx219.service or imx219-csi-warmup.sh missing — skipping)"
+fi
+
+echo -e "\n18. Verifying installations..."
 echo "Checking CUDA..."
 nvcc --version || echo "✗ CUDA not found"
 
@@ -337,12 +419,17 @@ echo "Next steps:"
 echo "1. REBOOT to load the camera device tree overlay"
 echo "2. Close and reopen your terminal (or run: source ~/.bashrc)"
 echo "3. Navigate to VisionSense directory: cd ~/VisionSense"
-echo "4. Regenerate TensorRT engines for this device's GPU+TRT version:"
-echo "     bash scripts/regenerate_engines.sh"
-echo "   (~20 min total; required because checked-in .engine files are not"
-echo "    portable across Jetsons. Backups of the previous engines are kept"
-echo "    as <name>.prev.<TIMESTAMP> so a partial run never leaves you broken.)"
+echo "4. (Optional) If LightStereo .engine is missing or this Jetson's TRT/GPU"
+echo "   version changed, re-export the engine:"
+echo "     # see archive/scripts/regenerate_engines.sh for the legacy FFS recipe,"
+echo "     # or rebuild LightStereo with OpenStereo's deploy/trt_profile.sh:"
+echo "     #   cd /home/jetson/OpenStereo && \\"
+echo "     #     PATH=/usr/src/tensorrt/bin:\$PATH bash deploy/trt_profile.sh \\"
+echo "     #       --onnx <lightstereo_onnx> --saveEngine <out>.engine --fp16"
 echo "5. Build with: colcon build --packages-select visionconnect"
-echo "6. Run with: ros2 launch visionconnect visionsense.launch.py"
+echo "6. Run with: bash launch_visionsense.sh   (or double-click the desktop icon)"
+echo "   The launch script exports FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA, which is"
+echo "   required to keep both stereo eyes at 30 Hz; running 'ros2 launch ...'"
+echo "   directly will skip that and one eye will drop to ~2 Hz."
 echo ""
 echo "If you encounter any issues, check the README.md"

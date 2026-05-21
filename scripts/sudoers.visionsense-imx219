@@ -1,0 +1,10 @@
+# Passwordless restart/start of the persistent IMX219 service. Required by
+# launch_visionsense.sh so it can re-trigger discovery without prompting.
+#
+# Install with:
+#   sudo cp scripts/sudoers.visionsense-imx219 /etc/sudoers.d/visionsense-imx219
+#   sudo chmod 0440 /etc/sudoers.d/visionsense-imx219
+#
+# /etc/sudoers.d files MUST be mode 0440 and owned by root or sudo refuses
+# to load them. `visudo -c` will confirm the file is well-formed.
+jetson ALL=(root) NOPASSWD: /bin/systemctl restart visionsense-imx219.service, /bin/systemctl start visionsense-imx219.service, /bin/systemctl is-active visionsense-imx219.service

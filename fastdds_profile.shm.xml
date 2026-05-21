@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Fast-DDS shared-memory transport profile for VisionSense.
+
+  Same-host bandwidth path: publisher writes the image into a POSIX shared
+  memory segment, subscriber maps the same segment and reads in place. No
+  kernel UDP buffers, no fragmentation, no copies into kernel space, no
+  packet loss. Latency ~10us instead of UDP loopback's ~ms-level fragment
+  reassembly.
+
+  Sizing:
+    1200x1200x3 RGB8 image  = 4.32 MB
+    queue depth 2 x 2 eyes  = 17 MB minimum
+    headroom for bursts     = 64 MB
+
+  Note: useBuiltinTransports=false means UDP is disabled entirely, so
+  cross-host ROS2 (e.g. talking to a node on a laptop) will NOT work.
+  Acceptable here because the whole VisionSense stack runs on one Jetson.
+  If cross-host is ever needed, define an additional UDPv4 transport and
+  add it to userTransports.
+-->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>shm_big</transport_id>
+      <type>SHM</type>
+      <segment_size>67108864</segment_size>
+      <port_queue_capacity>32</port_queue_capacity>
+      <healthy_check_timeout_ms>1000</healthy_check_timeout_ms>
+    </transport_descriptor>
+  </transport_descriptors>
+
+  <participant profile_name="shm_big_buffers" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>shm_big</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>

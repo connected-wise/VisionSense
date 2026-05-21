@@ -1,0 +1,56 @@
+[Unit]
+# Persistent owner of the IMX219 driver-monitor camera (Argus producer).
+#
+# Why this exists:
+#   The Jetson Argus stack (libargus + nvargus-daemon + tegra-camrtc RTCPU
+#   firmware) does not survive a Producer close on this module — every second
+#   nvarguscamerasrc session fails with INVALID_SETTINGS / "Argus Correctable
+#   Error Status", and only a system reboot recovers. Bare gst-launch
+#   reproduces it, so the bug is in NVIDIA's stack, not VisionSense.
+#
+# Workaround: open the IMX219 ONCE at boot from this systemd unit, keep the
+# Argus producer alive forever, and have VisionSense subscribe to /camera/raw
+# as a regular ROS topic. Closing VisionSense never touches Argus.
+#
+# Install:  sudo cp scripts/visionsense-imx219.service /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable --now visionsense-imx219.service
+#
+# Status:   systemctl status visionsense-imx219
+# Logs:     journalctl -u visionsense-imx219 -f
+#
+# DO NOT systemctl stop this in normal operation — that closes Argus and
+# triggers exactly the bug we're avoiding. Stop only immediately before a
+# reboot.
+Description=VisionSense IMX219 driver-monitor camera (persistent Argus producer)
+After=nvargus-daemon.service network-online.target
+Requires=nvargus-daemon.service
+
+[Service]
+Type=simple
+User=jetson
+Group=jetson
+WorkingDirectory=/home/jetson/VisionSense
+# Match the DDS profile used by launch_visionsense.sh — otherwise the
+# /camera/raw topic this service publishes may not reach VisionSense
+# subscribers (they'd be using a different SHM segment size).
+Environment=FASTRTPS_DEFAULT_PROFILES_FILE=/home/jetson/VisionSense/fastdds_profile.shm.xml
+# Warm up the Arducam CSI (sensor 1) once before opening Argus on sensor 0.
+# Without this, Argus's probe of sensor 1 misbehaves at fresh boot and
+# poisons the IMX219 capture session with SCF/PD_CRC_ERR errors ~5s in.
+# Script exits 0 even on failure so the service still tries to start.
+ExecStartPre=/home/jetson/VisionSense/scripts/imx219-csi-warmup.sh
+# `bash -lc` so ROS env files get sourced. `exec` so the ros2 process
+# inherits PID-1-of-cgroup status — systemd then signals it directly.
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source /home/jetson/VisionSense/install/setup.bash && exec ros2 run visionconnect camera --ros-args -r __node:=camera -p resource:=csi://0 -p width:=1280 -p height:=720'
+# 30s gap before restart-on-failure. Rapid retry won't help if Argus is
+# wedged (it just chews logs), and a slow loop makes the failure visible
+# to journalctl without spamming.
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=60
+# Default KillSignal=SIGTERM is fine — systemd only ever sends it on an
+# explicit stop, which is exactly what we DON'T want during normal runs.
+
+[Install]
+WantedBy=multi-user.target
