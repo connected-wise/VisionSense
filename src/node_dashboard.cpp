@@ -126,17 +126,21 @@ std::string json_escape(const std::string &s) {
 // push to the WS server.
 // ---------------------------------------------------------------------------
 
-// Common helper: fan a resized frame out to WebRTC (always, no-op if no
-// subscribers) and to the JPEG fallback path (skipped when WebRTC has a
-// subscriber for this stream so we don't burn CPU on encode that nobody
-// will read).
+// Fan a resized frame out to BOTH the WebRTC path (low-latency, NVENC H.264,
+// preferred) and the JPEG-over-WebSocket fallback (works on pure loopback
+// without any ICE / mDNS / network state — required when WiFi is off because
+// libnice 0.1.18 hardcodes "ignore loopback" during ICE candidate gathering,
+// so webrtcbin's offer SDP carries no usable address).
+//
+// The client (dashboard.html) prefers the WebRTC <video> when its
+// MediaStream actually delivers frames, and uses the JPEG <img> otherwise.
+// Sending both costs ~5-8 ms of JPEG encode per stream per frame — small
+// compared to "dashboard is blind whenever WiFi drops".
 static inline void fan_out(StreamId stream, const cv::Mat &img,
                             std::atomic<uint32_t> &counter) {
     g_webrtc->push_frame(stream, img);
-    if (!g_webrtc->has_active_subscribers(stream)) {
-        auto jpeg = jpeg_encode(img);
-        if (!jpeg.empty()) g_server->push_jpeg(stream, std::move(jpeg));
-    }
+    auto jpeg = jpeg_encode(img);
+    if (!jpeg.empty()) g_server->push_jpeg(stream, std::move(jpeg));
     counter.fetch_add(1, std::memory_order_relaxed);
 }
 

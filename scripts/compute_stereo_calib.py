@@ -179,6 +179,15 @@ def main():
     ap.add_argument("--reject-threshold", type=float, default=1.5,
                     help="drop pairs whose per-eye reprojection error exceeds "
                          "this many pixels in either eye (default 1.5)")
+    ap.add_argument("--same-focal-length", action="store_true", default=True,
+                    help="force fx_left == fx_right and fy_left == fy_right in "
+                         "stereoCalibrate (default ON — two identical lenses on "
+                         "the same module SHOULD share focal length; letting "
+                         "them drift apart produces a scale-mismatched "
+                         "rectified pair that breaks stereo matching).")
+    ap.add_argument("--no-same-focal-length", dest="same_focal_length",
+                    action="store_false",
+                    help="allow fx_left and fx_right to drift apart (rare)")
     args = ap.parse_args()
 
     pattern = (args.cols, args.rows)
@@ -246,16 +255,111 @@ def main():
 
     # ── Stereo calibration (extrinsics; keep intrinsics from above) ──────────
     print("\nStereo calibration...")
+    if args.same_focal_length:
+        # Force fx_left == fx_right (and fy_left == fy_right) by averaging the
+        # per-eye intrinsics and re-letting stereoCalibrate refine extrinsics.
+        # Two identical lenses on the same module SHOULD share focal length;
+        # letting them drift produces a rectified pair at different scales
+        # that breaks stereo matching for any algorithm (NN or classical).
+        avg_fx = (K1[0,0] + K2[0,0]) / 2
+        avg_fy = (K1[1,1] + K2[1,1]) / 2
+        K1[0,0] = K2[0,0] = avg_fx
+        K1[1,1] = K2[1,1] = avg_fy
+        print(f"  same-focal-length: forced fx={avg_fx:.2f}  fy={avg_fy:.2f} on both eyes")
     flags_stereo = cv2.CALIB_FIX_INTRINSIC
-    rms_stereo, K1, D1, K2, D2, R, T, E, F = cv2.stereoCalibrate(
-        obj_pts, left_pts, right_pts,
-        K1, D1, K2, D2, img_size,
-        flags=flags_stereo,
-        criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
-    )
+
+    def stereo_fit(obj_pts, left_pts, right_pts):
+        return cv2.stereoCalibrate(
+            obj_pts, left_pts, right_pts,
+            K1, D1, K2, D2, img_size,
+            flags=flags_stereo,
+            criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6),
+        )
+
+    def per_pair_stereo_err(obj_pts, left_pts, right_pts, R, T):
+        """Mean per-pair stereo reprojection error (worse of L/R eye)."""
+        errs = []
+        for i in range(len(obj_pts)):
+            ok, rv, tv = cv2.solvePnP(obj_pts[i], left_pts[i], K1, D1)
+            if not ok:
+                errs.append(float("inf")); continue
+            proj_l, _ = cv2.projectPoints(obj_pts[i], rv, tv, K1, D1)
+            Rl, _ = cv2.Rodrigues(rv)
+            Rr = R @ Rl
+            tr = R @ tv + T.reshape(3, 1)
+            rvr, _ = cv2.Rodrigues(Rr)
+            proj_r, _ = cv2.projectPoints(obj_pts[i], rvr, tr, K2, D2)
+            el = float(np.linalg.norm(left_pts[i]  - proj_l, axis=2).mean())
+            er = float(np.linalg.norm(right_pts[i] - proj_r, axis=2).mean())
+            errs.append(max(el, er))
+        return errs
+
+    rms_stereo, K1, D1, K2, D2, R, T, E, F = stereo_fit(obj_pts, left_pts, right_pts)
+    print(f"  initial stereo RMS: {rms_stereo:.4f} px on {len(obj_pts)} pairs")
+
+    # ── Detect 180°-rotated chessboard pairs (cv2.findChessboardCorners
+    # ambiguity for color-symmetric patterns like 7x5 → 8x6 squares).
+    # If a pair has high stereo reprojection but reversing the R-eye corner
+    # ordering makes it low, the board was detected with inverted ordering
+    # in the right view. Replace with the reversed corners.
+    print(f"\n  Scanning for 180°-rotated pairs (corner ordering disagreement)...")
+    errs = per_pair_stereo_err(obj_pts, left_pts, right_pts, R, T)
+    med_err = float(np.median(errs))
+    fix_thresh = max(3.0, 3.0 * med_err)
+    print(f"    median per-pair stereo err = {med_err:.2f} px; flagging > {fix_thresh:.2f} px")
+    flipped = 0; dropped = 0
+    new_left, new_right, new_obj, new_names = [], [], [], []
+    for i, (op, lp, rp, name, e) in enumerate(zip(obj_pts, left_pts, right_pts, names, errs)):
+        if e <= fix_thresh:
+            new_obj.append(op); new_left.append(lp); new_right.append(rp); new_names.append(name)
+            continue
+        # Try reversing R corners
+        rp_rev = rp[::-1].copy()
+        # Test as one-pair stereoCalibrate
+        ok, rv, tv = cv2.solvePnP(op, lp, K1, D1)
+        if not ok:
+            dropped += 1; continue
+        Rl, _ = cv2.Rodrigues(rv)
+        Rr = R @ Rl
+        tr = R @ tv + T.reshape(3, 1)
+        rvr, _ = cv2.Rodrigues(Rr)
+        proj_r, _ = cv2.projectPoints(op, rvr, tr, K2, D2)
+        # Compare detected R corners (original vs reversed) to projection
+        e_orig = float(np.linalg.norm(rp     - proj_r, axis=2).mean())
+        e_rev  = float(np.linalg.norm(rp_rev - proj_r, axis=2).mean())
+        if e_rev < e_orig and e_rev < fix_thresh:
+            new_obj.append(op); new_left.append(lp); new_right.append(rp_rev); new_names.append(name)
+            flipped += 1
+        else:
+            dropped += 1
+    print(f"    flipped {flipped} pairs (R-eye corners reversed)")
+    print(f"    dropped {dropped} pairs (irrecoverable)")
+    obj_pts, left_pts, right_pts, names = new_obj, new_left, new_right, new_names
+    rms_stereo, K1, D1, K2, D2, R, T, E, F = stereo_fit(obj_pts, left_pts, right_pts)
+    print(f"  after flip+drop: stereo RMS = {rms_stereo:.4f} px on {len(obj_pts)} pairs")
+
+    # Round of pure outlier drops based on new RMS
+    for round_idx in range(1, 4):
+        errs = per_pair_stereo_err(obj_pts, left_pts, right_pts, R, T)
+        thresh = max(2.0, 3.0 * float(np.median(errs)))
+        keep = [i for i, e in enumerate(errs) if e < thresh]
+        if len(keep) == len(obj_pts):
+            print(f"  round {round_idx}: all pairs within {thresh:.2f} px — converged")
+            break
+        if len(keep) < 15:
+            print(f"  round {round_idx}: only {len(keep)} would remain — stopping")
+            break
+        print(f"  round {round_idx}: dropping {len(obj_pts)-len(keep)} pairs >{thresh:.2f} px")
+        obj_pts   = [obj_pts[i]   for i in keep]
+        left_pts  = [left_pts[i]  for i in keep]
+        right_pts = [right_pts[i] for i in keep]
+        names     = [names[i]     for i in keep]
+        rms_stereo, K1, D1, K2, D2, R, T, E, F = stereo_fit(obj_pts, left_pts, right_pts)
+        print(f"    → {rms_stereo:.4f} px on {len(obj_pts)} pairs")
+
     baseline_m = float(np.linalg.norm(T))
     Tx, Ty, Tz = float(T[0]), float(T[1]), float(T[2])
-    print(f"  stereo RMS: {rms_stereo:.4f} px")
+    print(f"\n  final stereo RMS: {rms_stereo:.4f} px on {len(obj_pts)} pairs")
     print(f"  T (mm):     Tx={Tx*1000:.2f}  Ty={Ty*1000:.2f}  Tz={Tz*1000:.2f}   "
           f"||T||={baseline_m*1000:.2f}")
     print(f"  baseline:   {baseline_m * 1000.0:.2f} mm  (compare to your physical measurement)")

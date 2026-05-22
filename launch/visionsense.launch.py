@@ -330,7 +330,14 @@ def generate_launch_description():
 			"  --no-first-run --noerrdialogs --disable-infobars "
 			"  --disable-session-crashed-bubble --disable-translate "
 			"  --autoplay-policy=no-user-gesture-required "
-			"  --disable-features=TranslateUI,InterestFeedContentSuggestions "
+			# WebRtcHideLocalIpsWithMdns: Chrome 76+ replaces real local IPs in
+			# ICE candidates with random *.local mDNS hostnames for privacy.
+			# Resolving those needs avahi multicasting on an active non-loopback
+			# interface — fails when WiFi is off, so WebRTC media never opens
+			# even though signaling on the WebSocket works fine. Disabling this
+			# feature makes Chrome send raw 127.0.0.1 candidates so WebRTC
+			# works on localhost without any network.
+			"  --disable-features=TranslateUI,InterestFeedContentSuggestions,WebRtcHideLocalIpsWithMdns "
 			"  http://localhost:8080/"
 		)
 		dashboard_browser = TimerAction(

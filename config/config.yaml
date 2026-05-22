@@ -40,8 +40,10 @@ camera_stereo:
 stereo_depth_lightstereo:
     ros__parameters:
         engine_file_path:       "lightstereo_s_320x512.engine"
-        depth_vmax:             5.0     # colormap upper bound (m) — tune for the
-                                        # scene; 5 m for indoor, 20 m for outdoor.
+        depth_vmax:             20.0    # colormap upper bound (m). Covers
+                                        # both indoor (objects 1-5m bright) and
+                                        # outdoor (sky goes dark at vmax).
+                                        # Drop to 5 for indoor-only deployments.
                                         # Only affects /stereo_depth/depth_color
                                         # viz; /stereo_depth/depth is unchanged.
         warmup_iters:           3

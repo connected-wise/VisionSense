@@ -429,6 +429,10 @@ void WebRTCManager::mainloop_create_pipeline(ClientHandle client,
         "h264parse config-interval=-1 ! "
         "rtph264pay pt=96 config-interval=-1 ! "
         "application/x-rtp,media=video,encoding-name=H264,payload=96 ! "
+        // STUN is overridden programmatically below — gst_parse_launch syntax
+        // doesn't have a way to express a real NULL string, so we set it after
+        // the element exists. Default would be stun://stun.l.google.com:19302,
+        // which hangs on DNS without internet.
         "webrtcbin name=webrtc bundle-policy=max-bundle latency=0",
         cap.width, cap.height, cap.fps,
         cap.iframeinterval > 0 ? cap.iframeinterval : 15,
@@ -454,6 +458,16 @@ void WebRTCManager::mainloop_create_pipeline(ClientHandle client,
         gst_object_unref(pipeline);
         return;
     }
+
+    // Offline / LAN-only ICE: kill the default Google STUN server so ICE
+    // gathering doesn't stall on a DNS lookup when there's no internet. We
+    // also drop TURN — same reason. Host candidates (loopback + LAN
+    // interfaces) are what we want for same-machine / same-LAN browsers.
+    g_object_set(webrtcbin, "stun-server", nullptr, nullptr);
+    g_object_set(webrtcbin, "turn-server", nullptr, nullptr);
+    // Trickle ICE on; lets the browser get host candidates immediately
+    // without waiting for the full gather.
+    g_object_set(webrtcbin, "ice-transport-policy", 0, nullptr);  // 0 = ALL
 
     auto ctx = std::make_unique<PipelineCtx>();
     ctx->owner = this;

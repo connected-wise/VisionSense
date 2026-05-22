@@ -248,6 +248,13 @@ main {
   object-fit: contain;       /* scale to fit available cell, preserve aspect */
   background: #000;
 }
+/* HTML `hidden` loses against `display: block` above without !important.
+   We toggle between the WebRTC <video> and the JPEG-fallback <img> via the
+   hidden attribute and need it to actually take effect. */
+.hero-wrap img[hidden],
+.hero-wrap video[hidden],
+.thumb img[hidden],
+.thumb video[hidden] { display: none !important; }
 .hero-wrap .hero-label {
   position: absolute;
   top: 12px; left: 12px;
@@ -616,13 +623,30 @@ footer {
   // Streams we negotiate WebRTC for, in thumbnail display order. Fused
   // first because it's the headline view (detection + lanes + signs + ADAS).
   const VISIBLE_STREAMS = [1, 5, 2, 3, 4];
+  // Hero <img> overlay for the JPEG fallback (shown when WebRTC isn't
+  // delivering frames for the active stream — e.g. WiFi off, libnice can't
+  // gather a loopback ICE candidate, the media path never opens).
+  const heroImg = document.createElement("img");
+  heroImg.id = "heroImg";
+  heroImg.alt = "";
+  heroImg.hidden = true;
+  heroVideo.parentNode.insertBefore(heroImg, heroVideo);
+
   document.querySelectorAll(".thumb").forEach((btn) => {
     const id = Number(btn.dataset.stream);
+    // Each thumb gets a sibling <img> for the JPEG fallback.
+    const img = document.createElement("img");
+    img.alt = "";
+    img.hidden = true;
+    btn.appendChild(img);
     streams[id] = {
       video:       btn.querySelector("video"),
+      img:         img,
       thumbBtn:    btn,
       pc:          null,
       mediaStream: null,
+      jpegBlobUrl: null,
+      hasWebRTC:   false,
     };
     btn.addEventListener("click", () => setActive(id));
   });
@@ -635,16 +659,57 @@ footer {
       streams[k].thumbBtn.classList.toggle("active", Number(k) === id);
     }
     heroLabel.textContent = STREAM_LABELS[id] || ("Stream " + id);
-    const ms = streams[id].mediaStream;
-    if (ms) {
-      heroVideo.srcObject = ms;
-      heroVideo.hidden = false;
+    updateHero();
+  }
+
+  // Idempotent: only re-assigns the hero's source when it actually changes,
+  // so 30 fps JPEG arrivals don't bounce the video element through its load
+  // lifecycle (was producing visible flicker).
+  function updateHero() {
+    const s = streams[activeStream];
+    if (!s) return;
+    if (s.mediaStream && s.hasWebRTC) {
+      if (heroVideo.srcObject !== s.mediaStream) heroVideo.srcObject = s.mediaStream;
+      if (heroVideo.hidden) heroVideo.hidden = false;
+      if (!heroImg.hidden) heroImg.hidden = true;
+      heroEmpty.style.display = "none";
+    } else if (s.jpegBlobUrl) {
+      if (heroImg.src !== s.jpegBlobUrl) heroImg.src = s.jpegBlobUrl;
+      if (heroImg.hidden) heroImg.hidden = false;
+      if (!heroVideo.hidden) heroVideo.hidden = true;
       heroEmpty.style.display = "none";
     } else {
-      heroVideo.srcObject = null;
-      heroVideo.hidden = true;
+      if (heroVideo.srcObject) heroVideo.srcObject = null;
+      if (!heroVideo.hidden) heroVideo.hidden = true;
+      if (!heroImg.hidden) heroImg.hidden = true;
+      if (heroImg.getAttribute("src")) heroImg.removeAttribute("src");
       heroEmpty.style.display = "";
     }
+  }
+
+  // Binary WebSocket frame: byte 0 = stream id, bytes 1.. = JPEG payload.
+  // Object URLs are revoked AFTER every consumer (thumb img + hero img if
+  // active) has been pointed at the new URL — otherwise the hero briefly
+  // dereferences a revoked URL between frames, causing flicker.
+  function onBinaryFrame(buf) {
+    if (!(buf instanceof ArrayBuffer) || buf.byteLength < 2) return;
+    const bytes = new Uint8Array(buf);
+    const streamId = bytes[0];
+    const s = streams[streamId];
+    if (!s) return;
+    const jpeg = new Blob([bytes.subarray(1)], { type: "image/jpeg" });
+    const newUrl = URL.createObjectURL(jpeg);
+    const oldUrl = s.jpegBlobUrl;
+    s.jpegBlobUrl = newUrl;
+
+    if (!s.hasWebRTC) {
+      s.img.src = newUrl;
+      if (s.img.hidden) s.img.hidden = false;
+      if (!s.video.hidden) s.video.hidden = true;
+    }
+    if (streamId === activeStream) updateHero();
+
+    if (oldUrl) URL.revokeObjectURL(oldUrl);
   }
 
   // ---------- WebRTC negotiation per stream ----------
@@ -667,6 +732,15 @@ footer {
       const ms = ev.streams[0] || new MediaStream([ev.track]);
       s.mediaStream = ms;
       s.video.srcObject = ms;
+      // Wait for the first actual decoded frame before flipping hasWebRTC,
+      // so we don't hide the JPEG fallback during the 100-500 ms warm-up
+      // window where the <video> is black.
+      s.video.onloadeddata = () => {
+        s.hasWebRTC = true;
+        s.video.hidden = false;
+        s.img.hidden = true;
+        if (id === activeStream) updateHero();
+      };
       // Zero the receiver's jitter buffer hint — Chrome defaults to ~100 ms
       // of buffering for smoothness, which dominates perceived latency on
       // localhost. We accept frame jitter for the latency win.
@@ -674,11 +748,6 @@ footer {
         if ("playoutDelayHint" in ev.receiver) ev.receiver.playoutDelayHint = 0;
         if ("jitterBufferTarget" in ev.receiver) ev.receiver.jitterBufferTarget = 0;
       } catch {}
-      if (id === activeStream) {
-        heroVideo.srcObject = ms;
-        heroVideo.hidden = false;
-        heroEmpty.style.display = "none";
-      }
     };
     pc.onicecandidate = (ev) => {
       if (ev.candidate) {
@@ -736,11 +805,9 @@ footer {
     }
     s.mediaStream = null;
     s.video.srcObject = null;
-    if (id === activeStream) {
-      heroVideo.srcObject = null;
-      heroVideo.hidden = true;
-      heroEmpty.style.display = "";
-    }
+    s.hasWebRTC = false;
+    s.video.onloadeddata = null;
+    if (id === activeStream) updateHero();
   }
 
   // ---------- Telemetry handlers ----------
@@ -838,7 +905,10 @@ footer {
       for (const id of VISIBLE_STREAMS) startWebRTC(id);
     };
     ws.onmessage = (ev) => {
-      if (typeof ev.data !== "string") return;  // no binary path anymore
+      if (typeof ev.data !== "string") {
+        onBinaryFrame(ev.data);
+        return;
+      }
       let m;
       try { m = JSON.parse(ev.data); } catch { return; }
       switch (m.t) {

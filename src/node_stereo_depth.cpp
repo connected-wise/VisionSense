@@ -66,8 +66,27 @@ public:
     }
 } g_logger;
 
-constexpr float kImageNetMean[3] = {0.485f, 0.456f, 0.406f};
-constexpr float kImageNetStd[3]  = {0.229f, 0.224f, 0.225f};
+// This specific engine appears to have its input normalization baked into
+// the ONNX graph (the OpenStereo deploy/export.py exports BARE — without
+// normalization — so whoever built this engine added preprocessing layers
+// in a custom export step). Applying ImageNet (mean/std) externally on
+// top double-normalizes and pushes disparities significantly too high.
+//
+// Cross-validated WITHOUT vs WITH normalization on the new calibration:
+//
+//   preprocess         LS/SGBM disp ratio (median)
+//   /255 only          1.017     ← agrees with SGBM ground truth
+//   /255 + ImageNet    1.696     ← 70 % too high; saturates close
+//
+// And on KITTI samples:
+//   KITTI 000007 (close-range scene):
+//      /255 only        → median 6.25 m, proper sky/foreground ordering
+//      /255 + ImageNet  → median 2.36 m, sky band = foreground band (collapsed)
+//
+// Keep mean=0, std=1 so the fused CUDA kernel just does x/255 — the
+// engine handles any further normalization internally.
+constexpr float kImageNetMean[3] = {0.0f, 0.0f, 0.0f};
+constexpr float kImageNetStd[3]  = {1.0f, 1.0f, 1.0f};
 
 inline cv::Mat matFromNode(const YAML::Node& node) {
     int rows = node["rows"].as<int>();
