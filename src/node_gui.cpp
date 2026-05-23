@@ -722,10 +722,13 @@ static void drawLaneDepartureBanner(cv::Mat& image, int direction)
     const int W = image.cols;
     const int H = image.rows;
 
-    // Compact badge — scales with frame, clamped tight.
-    const int bw = std::clamp(static_cast<int>(W * 0.17f), 180, 300);
-    const int bh = std::clamp(static_cast<int>(H * 0.05f), 36, 54);
-    const int margin = std::max(10, static_cast<int>(H * 0.018f));
+    // Compact badge — scales with frame, clamped tight. All sizing constants
+    // halved from the original to shrink the badge to ~50% of its previous
+    // footprint (linear; area is ~¼). Auto-fit loop below still handles the
+    // smaller text zone gracefully.
+    const int bw = std::clamp(static_cast<int>(W * 0.085f), 90, 150);
+    const int bh = std::clamp(static_cast<int>(H * 0.025f), 18, 27);
+    const int margin = std::max(5, static_cast<int>(H * 0.018f));
     const int bx = (direction < 0) ? margin : (W - bw - margin);
     const int by = margin;
     const cv::Rect rect(bx, by, bw, bh);
@@ -785,8 +788,12 @@ static void drawLaneDepartureBanner(cv::Mat& image, int direction)
     cv::Size ts = cv::getTextSize(text, cv::FONT_HERSHEY_DUPLEX, scale, thickness, &baseline);
     const int text_zone_x = (direction < 0) ? bx + side_pad * 2 + arrow_w : bx + side_pad;
     const int text_zone_w = bw - (side_pad * 3 + arrow_w);
-    while (ts.width > text_zone_w && scale > 0.35) {
-        scale -= 0.04;
+    // Lower floor + finer step now that bh can drop to ~18 px after the 50%
+    // shrink. At the previous 0.35 floor the loop never executed for small
+    // badges (initial scale was already below 0.35) and "LANE DEPARTURE"
+    // would overflow the pill horizontally.
+    while (ts.width > text_zone_w && scale > 0.18) {
+        scale -= 0.03;
         ts = cv::getTextSize(text, cv::FONT_HERSHEY_DUPLEX, scale, thickness, &baseline);
     }
     const int tx = text_zone_x + (text_zone_w - ts.width) / 2;
@@ -1344,53 +1351,56 @@ void fuse_data()
             draw_distance(depth, x, y, w, h, box_color, fscale);
         }
 
-        else if (cls == 6 && j<signLabels.size() && j<signScores.size() && signScores[j]>0.5)
+        else if (cls == 6)  // traffic light
         {
-            label = signLabels[j];
-            if (label == "red light")
-            {
-                label = label + " " + fmt_score(signScores[j]);
-                cv::Scalar c(0, 0, 255);
-                draw_box_2d(x, y, w, h, c);
-                draw_label(label, x, y, c, 0.38);
-                j++;
-            }
+            // Always draw the detector's box. If the classifier has a result
+            // for this slot AND it identifies one of the known colors with
+            // enough confidence, override the box color + label; otherwise
+            // fall back to the generic "tlight" label and detector score.
+            // Crucially `j` always advances when a classifier slot exists,
+            // so the index stays in sync with downstream tlight/tsign entries.
+            cv::Scalar box_color = colors[6];
+            label = std::string("tlight ") + fmt_score(scores[i]);
 
-            else if (label == "green light")
-            {
-                label = label + " " + fmt_score(signScores[j]);
-                cv::Scalar c(55, 235, 100);
-                draw_box_2d(x, y, w, h, c);
-                draw_label(label, x, y, c, 0.38);
+            if (j < signLabels.size() && j < signScores.size()) {
+                const std::string& clab = signLabels[j];
+                const float cscore = signScores[j];
+                if (cscore > 0.5f) {
+                    if (clab == "red light") {
+                        box_color = cv::Scalar(0, 0, 255);
+                        label = clab + " " + fmt_score(cscore);
+                    } else if (clab == "green light") {
+                        box_color = cv::Scalar(55, 235, 100);
+                        label = clab + " " + fmt_score(cscore);
+                    } else if (clab == "yellow light") {
+                        box_color = cv::Scalar(0, 200, 255);
+                        label = clab + " " + fmt_score(cscore);
+                    }
+                }
                 j++;
             }
-
-            else if (label == "yellow light")
-            {
-                label = label + " " + fmt_score(signScores[j]);
-                cv::Scalar c(0, 200, 255);
-                draw_box_2d(x, y, w, h, c);
-                draw_label(label, x, y, c, 0.38);
-                j++;
-            }
-            else
-            {
-                j++;
-                continue;
-            }
-
+            draw_box_2d(x, y, w, h, box_color);
+            draw_label(label, x, y, box_color, 0.38);
         }
 
-        else if (cls == 7 && j<signLabels.size() && j<signScores.size() && signScores[j]>0.65)  // if traffic sign
+        else if (cls == 7)  // traffic sign
         {
-            label = signLabels[j];
-            if (label != "guide sign")
-            {
-                label = label + " " + fmt_score(signScores[j]);
-                draw_box_2d(x, y, w, h, colors[7]);
-                draw_label(label, x, y, colors[7], 0.38);
+            // Mirror of cls==6: always draw the detector's box, overlay the
+            // classifier label when it's available, confident, and not the
+            // uninformative "guide sign" string.
+            cv::Scalar box_color = colors[7];
+            label = std::string("tsign ") + fmt_score(scores[i]);
+
+            if (j < signLabels.size() && j < signScores.size()) {
+                const std::string& clab = signLabels[j];
+                const float cscore = signScores[j];
+                if (cscore > 0.65f && clab != "guide sign") {
+                    label = clab + " " + fmt_score(cscore);
+                }
+                j++;
             }
-            j++;
+            draw_box_2d(x, y, w, h, box_color);
+            draw_label(label, x, y, box_color, 0.38);
         }
     }
 
@@ -1498,74 +1508,62 @@ void fuse_data()
             // Create transparent overlay for all lane areas
             cv::Mat overlay = img.clone();
             
-            // Lane 1: Filled area between blue and green extrapolated lines
-            if (valid_lane_by_color[0] && valid_lane_by_color[1]) {
-                std::vector<cv::Point> lane1_area = createClippedLaneArea(
-                    lane_top_points_by_color[0],      // Blue top
-                    lane_top_points_by_color[1],      // Green top  
-                    lane_bottom_points_by_color[1],   // Green bottom
-                    lane_bottom_points_by_color[0]    // Blue bottom
+            // Ego lane indices are now picked geometrically by ADAS (whichever
+            // pair of boundaries straddles the camera center), not hardcoded
+            // to channels [1,2]. Side lanes are "anything to the left of
+            // ego_left" and "anything to the right of ego_right".
+            int ego_left  = local_adas_msg->ego_left_lane_idx;
+            int ego_right = local_adas_msg->ego_right_lane_idx;
+
+            auto fillLaneAndLabel = [&](int left_idx, int right_idx,
+                                        const cv::Scalar& tint, const std::string& label) {
+                if (left_idx < 0 || right_idx < 0) return;
+                if (!valid_lane_by_color[left_idx] || !valid_lane_by_color[right_idx]) return;
+                std::vector<cv::Point> area = createClippedLaneArea(
+                    lane_top_points_by_color[left_idx],
+                    lane_top_points_by_color[right_idx],
+                    lane_bottom_points_by_color[right_idx],
+                    lane_bottom_points_by_color[left_idx]
                 );
-                
-                // Fill area on overlay with blue tint
-                cv::fillPoly(overlay, lane1_area, cv::Scalar(255, 200, 150)); // Blue tint
-                
-                // Add lane 1 label
-                cv::Point lane1_center = cv::Point(
-                    std::accumulate(lane1_area.begin(), lane1_area.end(), 0, [](int sum, const cv::Point& p) { return sum + p.x; }) / lane1_area.size(),
-                    std::accumulate(lane1_area.begin(), lane1_area.end(), 0, [](int sum, const cv::Point& p) { return sum + p.y; }) / lane1_area.size()
+                cv::fillPoly(overlay, area, tint);
+                cv::Point center(
+                    std::accumulate(area.begin(), area.end(), 0, [](int s, const cv::Point& p){ return s + p.x; }) / (int)area.size(),
+                    std::accumulate(area.begin(), area.end(), 0, [](int s, const cv::Point& p){ return s + p.y; }) / (int)area.size()
                 );
-                cv::putText(overlay, "Lane 1", lane1_center, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 2);
+                cv::putText(overlay, label, center, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 2);
+            };
+
+            // Find the nearest valid lane to the outside of each ego boundary
+            // to paint the adjacent-left and adjacent-right side regions.
+            int side_left = -1, side_right = -1;
+            if (ego_left >= 0) {
+                for (int i = ego_left - 1; i >= 0; --i) {
+                    if (valid_lane_by_color[i]) { side_left = i; break; }
+                }
             }
-            
-            // Lane 2: Filled area between green and red extrapolated lines  
-            if (valid_lane_by_color[1] && valid_lane_by_color[2]) {
-                
-                std::vector<cv::Point> lane2_area = createClippedLaneArea(
-                    lane_top_points_by_color[1],      // Green top
-                    lane_top_points_by_color[2],      // Red top
-                    lane_bottom_points_by_color[2],   // Red bottom
-                    lane_bottom_points_by_color[1]    // Green bottom
-                );
-                
-                // Fill area on overlay with green tint
-                cv::fillPoly(overlay, lane2_area, cv::Scalar(150, 255, 150)); // Green tint
-                
-                // Add lane 2 label
-                cv::Point lane2_center = cv::Point(
-                    std::accumulate(lane2_area.begin(), lane2_area.end(), 0, [](int sum, const cv::Point& p) { return sum + p.x; }) / lane2_area.size(),
-                    std::accumulate(lane2_area.begin(), lane2_area.end(), 0, [](int sum, const cv::Point& p) { return sum + p.y; }) / lane2_area.size()
-                );
-                cv::putText(overlay, "Lane 2", lane2_center, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 2);
+            if (ego_right >= 0) {
+                for (int i = ego_right + 1; i < 4; ++i) {
+                    if (valid_lane_by_color[i]) { side_right = i; break; }
+                }
             }
-            
-            // Lane 3: Filled area between red and cyan extrapolated lines
-            if (valid_lane_by_color[2] && valid_lane_by_color[3]) {
-                std::vector<cv::Point> lane3_area = createClippedLaneArea(
-                    lane_top_points_by_color[2],      // Red top
-                    lane_top_points_by_color[3],      // Cyan top
-                    lane_bottom_points_by_color[3],   // Cyan bottom
-                    lane_bottom_points_by_color[2]    // Red bottom
-                );
-                
-                // Fill area on overlay with red tint
-                cv::fillPoly(overlay, lane3_area, cv::Scalar(150, 200, 255)); // Red tint
-                
-                // Add lane 3 label
-                cv::Point lane3_center = cv::Point(
-                    std::accumulate(lane3_area.begin(), lane3_area.end(), 0, [](int sum, const cv::Point& p) { return sum + p.x; }) / lane3_area.size(),
-                    std::accumulate(lane3_area.begin(), lane3_area.end(), 0, [](int sum, const cv::Point& p) { return sum + p.y; }) / lane3_area.size()
-                );
-                cv::putText(overlay, "Lane 3", lane3_center, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 2);
-            }
-            
+
+            // Side lane on the left of ego (blue tint)
+            fillLaneAndLabel(side_left, ego_left, cv::Scalar(255, 200, 150), "Lane 1");
+            // Ego lane (green tint) — the actual current lane region
+            fillLaneAndLabel(ego_left, ego_right, cv::Scalar(150, 255, 150), "Lane 2");
+            // Side lane on the right of ego (red tint)
+            fillLaneAndLabel(ego_right, side_right, cv::Scalar(150, 200, 255), "Lane 3");
+
             // Blend overlay with original image for transparency
             cv::addWeighted(img, 0.6, overlay, 0.4, 0, img);
-            
-            // Update lane region availability based on which lane areas can be drawn
-            lane_region_1_available = valid_lane_by_color[0] && valid_lane_by_color[1]; // Lane 1 (between lines 0-1)
-            lane_region_2_available = valid_lane_by_color[1] && valid_lane_by_color[2]; // Lane 2 (between lines 1-2)  
-            lane_region_3_available = valid_lane_by_color[2] && valid_lane_by_color[3]; // Lane 3 (between lines 2-3)
+
+            // Availability flags now reflect the geometry-resolved regions.
+            lane_region_1_available = (side_left >= 0 && ego_left >= 0
+                                       && valid_lane_by_color[side_left] && valid_lane_by_color[ego_left]);
+            lane_region_2_available = (ego_left >= 0 && ego_right >= 0
+                                       && valid_lane_by_color[ego_left] && valid_lane_by_color[ego_right]);
+            lane_region_3_available = (ego_right >= 0 && side_right >= 0
+                                       && valid_lane_by_color[ego_right] && valid_lane_by_color[side_right]);
 
             // Vehicle quadrant identification system
             if (local_detect_msg != NULL) {

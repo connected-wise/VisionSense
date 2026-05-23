@@ -31,24 +31,25 @@ camera_stereo:
         # AR0234 sensor is 5.76 mm wide. The 1440-wide eye is center-cropped to
         # 900×900 (= 5.76 × 900/1920 = 2.7 mm) before LightStereo resizes to 320.
         sensor_width_mm:    2.7
-        baseline_mm:        101.3
+        baseline_mm:        100.0
         focal_length_mm:    3.6
         calibration_file:   "stereo_calib.yaml"   # produced by scripts/compute_stereo_calib.py
 
-# LightStereo-S TRT (OpenStereo, ICRA 2025). ~16 ms GPU on Orin NX at 320×512.
+# Fast-FoundationStereo (FFS) TRT — production stereo depth engine.
+# Foundation-model-pretrained stereo network, robust on outdoor scenes,
+# ~55 ms per frame on Orin NX. 320×320 input, max_disp=64, no external
+# normalization. Used by node_stereo_depth_ffs (executable: stereo_depth_ffs).
 # engine_file_path is relative to share/visionconnect/graphs/stereo-depth.
-stereo_depth_lightstereo:
+# The legacy LightStereo-S config block lived here too — removed once the
+# launch graph migrated fully to FFS; the LightStereo engine + node remain
+# available for `ros2 run` debugging but use their own internal defaults.
+stereo_depth_ffs:
     ros__parameters:
-        engine_file_path:       "lightstereo_s_320x512.engine"
-        depth_vmax:             20.0    # colormap upper bound (m). Covers
-                                        # both indoor (objects 1-5m bright) and
-                                        # outdoor (sky goes dark at vmax).
-                                        # Drop to 5 for indoor-only deployments.
-                                        # Only affects /stereo_depth/depth_color
-                                        # viz; /stereo_depth/depth is unchanged.
+        engine_file_path:       "fast_foundationstereo.engine"
+        depth_vmax:             100.0    # FFS handles farther depths sensibly
         warmup_iters:           3
         sync_slop_s:            0.05
-        depth_color_publish_w:  0       # 0 = native eye width; <native = downscale (artifacts on holes)
+        depth_color_publish_w:  0
 
 detect:
     ros__parameters:
@@ -58,14 +59,14 @@ detect:
         thresholds:
             - 0.40    # all
             - 0.45    # pedestrian
-            - 0.45    # cyclist
+            - 0.35    # cyclist
             - 0.60    # car
             - 0.45    # bus
             - 0.45    # truck
-            - 0.50    # train
-            - 0.40    # traffic light
-            - 0.55    # traffic sign
-            - 0.45    # bike (rider-less)
+            - 0.40    # train
+            - 0.25    # traffic light
+            - 0.25    # traffic sign
+            - 0.35    # bike (rider-less)
         track_frame_rate:   30
         track_buffer:       30
 
@@ -80,6 +81,29 @@ classify:
 lanedet:
     ros__parameters:
         model:      "lane_detect.engine"
+        # Horizon crop: fraction of image height to skip from the top before
+        # feeding the network. 0.5 = bottom half (legacy), 0.6 = bottom 40%,
+        # etc. The model is highly sensitive to this — too much sky/dashboard
+        # in the crop drops lane recall. Tune live with
+        # `python3 scripts/lanedet_crop_calibrator.py` (up/down keys).
+        crop_ratio: 0.60
+
+        # Preprocessing math: (pixel − sub) / div, in RGB channel order.
+        # ERFNet-CULane was trained with VGG-style BGR mean centering, which
+        # in RGB-input order means sub=[123.68, 116.779, 103.939], div=1, no
+        # /255 (pre_normalize=false). The legacy default was a uniform 125
+        # — close to the channel average but per-channel-mismatched. Switch
+        # to the BGR-mean preset for a closer match to training distribution.
+        pre_sub_rgb:    [123.68, 116.779, 103.939]
+        pre_div_rgb:    [1.0,    1.0,     1.0]
+        pre_normalize:  false    # if true, /255 before sub/div (true ImageNet)
+
+        # CLAHE on the cropped band (luma only, color preserved). Helps the
+        # network see a stable input distribution despite camera auto-exposure
+        # / lighting swings. Cheap (~0.5 ms on Orin), default off.
+        clahe_enable:     false
+        clahe_clip_limit: 2.0
+        clahe_tile_grid:  8
 
 gui:
     ros__parameters:
@@ -97,6 +121,19 @@ bev:
         enable_ground_plane: false
         render_rate_hz:      10
         gyro_alpha:          0.98   # complementary filter: gyro vs GPS heading
+        # NOTE: calibration_file is injected at launch time from
+        # camera_stereo.calibration_file — no need to set it here.
+
+adas:
+    ros__parameters:
+        # Normalized X (0..1) position of the camera optical center within the
+        # lanedet frame. Used as the split point for ego-left/ego-right lane
+        # boundary selection. The physical mount on this rig is biased
+        # right-of-image-center; 0.5 makes the selector treat the actual left
+        # lane as the right ego boundary. Re-measure after any re-mount or
+        # main_eye change: drive a straight lane and watch
+        # /adas/adas_alerts.current_lane_midpoint_x under good conditions.
+        ref_center_x_normalized: 0.65
 
 driver_monitor:
     ros__parameters:

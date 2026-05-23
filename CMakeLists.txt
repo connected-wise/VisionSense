@@ -110,6 +110,7 @@ add_executable(driver_monitor src/node_driver_monitor.cpp ${common_src})
 add_executable(imu_gps src/node_imu_gps.cpp ${common_src})
 add_executable(bev src/node_bev.cpp ${common_src})
 add_executable(stereo_depth src/node_stereo_depth.cpp ${common_src})
+add_executable(stereo_depth_ffs src/node_stereo_depth_ffs.cpp ${common_src})
 
 # 'include' directories
 include_directories(src/include ${catkin_INCLUDE_DIRS} ${CUDA_INCLUDE_DIRS})
@@ -208,6 +209,7 @@ target_link_libraries(bev
     ${TENSORRT_LIBS}
     jetson-inference
     common
+    yaml-cpp
 )
 
 target_link_libraries(imu_gps
@@ -219,6 +221,16 @@ target_link_libraries(imu_gps
 )
 
 target_link_libraries(stereo_depth
+    ${catkin_LIBRARIES}
+    ${OpenCV_LIBRARIES}
+    common
+    nvinfer
+    cudart
+    stereo_rectify_cuda
+    yaml-cpp
+)
+
+target_link_libraries(stereo_depth_ffs
     ${catkin_LIBRARIES}
     ${OpenCV_LIBRARIES}
     common
@@ -357,6 +369,14 @@ ament_target_dependencies(stereo_depth
     OpenCV
 )
 
+ament_target_dependencies(stereo_depth_ffs
+    ament_index_cpp
+    rclcpp
+    sensor_msgs
+    std_msgs
+    OpenCV
+)
+
 # Install executables to ROS project
 install(TARGETS camera DESTINATION lib/${PROJECT_NAME})
 install(TARGETS camera_stereo DESTINATION lib/${PROJECT_NAME})
@@ -371,6 +391,7 @@ install(TARGETS bev DESTINATION lib/${PROJECT_NAME})
 install(TARGETS driver_monitor DESTINATION lib/${PROJECT_NAME})
 install(TARGETS imu_gps DESTINATION lib/${PROJECT_NAME})
 install(TARGETS stereo_depth DESTINATION lib/${PROJECT_NAME})
+install(TARGETS stereo_depth_ffs DESTINATION lib/${PROJECT_NAME})
 
 # Install Python scripts
 install(PROGRAMS

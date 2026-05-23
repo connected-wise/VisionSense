@@ -4,6 +4,8 @@
 #include "visionconnect/msg/adas.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <opencv2/opencv.hpp>
+#include <array>
+#include <limits>
 
 visionconnect::msg::Lanes::SharedPtr lanes_msg = NULL;
 Publisher<visionconnect::msg::ADAS> adas_pub = NULL;
@@ -14,7 +16,13 @@ private:
     int image_height_;
     float warning_threshold_;
     float severe_threshold_;
-    
+
+    // Normalized X (0..1) of the camera optical center within the lanedet
+    // image. Defaults to 0.5 but the physical mount on this rig is biased
+    // right-of-center, so the real value is closer to 0.75. Used both as the
+    // initial EMA seed and as the ego-pair split point in processLanes().
+    float ref_center_x_normalized_;
+
     // Camera center calibration
     float calibrated_camera_center_x_;
     float convergence_rate_;
@@ -31,23 +39,31 @@ private:
     };
     
 public:
-    LaneDepartureWarning() 
-        : image_width_(1920), image_height_(1080), 
+    LaneDepartureWarning()
+        : image_width_(1920), image_height_(1080),
           warning_threshold_(50.0f), severe_threshold_(100.0f),
+          ref_center_x_normalized_(0.65f),
           calibrated_camera_center_x_(0.0f), convergence_rate_(0.01f),
           min_lane_quality_threshold_(0.85f), is_camera_center_initialized_(false) {
-        // Initialize calibrated camera center to image center
-        calibrated_camera_center_x_ = image_width_ / 2.0f;
+        calibrated_camera_center_x_ = image_width_ * ref_center_x_normalized_;
     }
-    
+
     void setImageDimensions(int width, int height) {
         image_width_ = width;
         image_height_ = height;
-        // Reinitialize calibrated camera center if dimensions change
         if (!is_camera_center_initialized_) {
-            calibrated_camera_center_x_ = image_width_ / 2.0f;
+            calibrated_camera_center_x_ = image_width_ * ref_center_x_normalized_;
         }
     }
+
+    void setRefCenterXNormalized(float v) {
+        ref_center_x_normalized_ = std::min(0.95f, std::max(0.05f, v));
+        if (!is_camera_center_initialized_) {
+            calibrated_camera_center_x_ = image_width_ * ref_center_x_normalized_;
+        }
+    }
+
+    float getRefCenterXNormalized() const { return ref_center_x_normalized_; }
     
     void updateCameraCenter(float current_lane_midpoint, float lane_quality_score) {
         if (lane_quality_score >= min_lane_quality_threshold_) {
@@ -256,72 +272,87 @@ public:
             }
         }
         
-        // Extrapolate green (index 1) and red (index 2) lanes - center lane boundaries
-        LaneExtrapolation green_lane = {cv::Point2f(0, 0), cv::Point2f(0, 0), 0.0f, 0.0f, false, 0.0f};
-        LaneExtrapolation red_lane = {cv::Point2f(0, 0), cv::Point2f(0, 0), 0.0f, 0.0f, false, 0.0f};
-        
-        if (valid_lane_by_color[1] && lane_polylines.size() > 1) {
-            green_lane = extrapolateLane(lane_polylines[1], max_height_y);
+        // Extrapolate every valid lane up front. Indices match the model's
+        // channel order (blue=0, green=1, red=2, cyan=3) so downstream viz keeps
+        // the same coloring; we just don't trust them as ego boundaries anymore.
+        std::array<LaneExtrapolation, 4> all_lanes;
+        for (auto& l : all_lanes) {
+            l = {cv::Point2f(0, 0), cv::Point2f(0, 0), 0.0f, 0.0f, false, 0.0f};
         }
-        
-        if (valid_lane_by_color[2] && lane_polylines.size() > 2) {
-            red_lane = extrapolateLane(lane_polylines[2], max_height_y);
+        for (size_t lane_idx = 0; lane_idx < std::min(size_t(4), lane_polylines.size()); lane_idx++) {
+            if (valid_lane_by_color[lane_idx]) {
+                all_lanes[lane_idx] = extrapolateLane(lane_polylines[lane_idx], max_height_y);
+            }
         }
-        
-        // Calculate lane departure if both center lane boundaries are valid
-        if (green_lane.valid && red_lane.valid) {
-            // Use bottom points directly - already in normalized coordinates
-            float green_x_normalized = green_lane.bottom_point.x;
-            float red_x_normalized = red_lane.bottom_point.x;
-            
-            // Current lane center midpoint at vehicle position (normalized)
-            float current_lane_midpoint_normalized = (green_x_normalized + red_x_normalized) / 2.0f;
-            float camera_center_normalized = getCalibratedCameraCenter() / float(image_width_);
-            
-            // Calculate combined lane quality score
-            float combined_lane_quality = (green_lane.quality_score + red_lane.quality_score) / 2.0f;
-            
-            // Update calibrated camera center based on current lane quality (convert to pixel coords for internal calculation)
+
+        // Publish per-channel extrapolated points (initialize first, then fill).
+        // These are color-coded viz only — ego pair selection happens below.
+        for (int i = 0; i < 4; i++) {
+            adas_msg.lane_top_x[i]    = 0.0f;
+            adas_msg.lane_bottom_x[i] = 0.0f;
+            adas_msg.lane_top_y[i]    = 0.0f;
+            adas_msg.lane_bottom_y[i] = 0.0f;
+            adas_msg.lane_valid[i]    = false;
+        }
+        for (int i = 0; i < 4; i++) {
+            if (all_lanes[i].valid) {
+                adas_msg.lane_top_x[i]    = all_lanes[i].top_point.x;
+                adas_msg.lane_bottom_x[i] = all_lanes[i].bottom_point.x;
+                adas_msg.lane_top_y[i]    = all_lanes[i].top_point.y;
+                adas_msg.lane_bottom_y[i] = all_lanes[i].bottom_point.y;
+                adas_msg.lane_valid[i]    = true;
+            }
+        }
+
+        // Ego-lane selection by geometry, not by channel index. Pick the
+        // closest valid boundary on each side of the camera optical center at
+        // the bottom of the image. Use the *uncalibrated* reference center
+        // here (configurable via param, default 0.75 because the physical
+        // mount on this rig is biased right-of-image-center) to avoid a
+        // feedback loop where a bad selection biases the EMA that we'd then
+        // use to keep picking the same bad pair.
+        const float ref_center_normalized = ref_center_x_normalized_;
+        int ego_left_idx = -1, ego_right_idx = -1;
+        float best_left_x  = -std::numeric_limits<float>::infinity();
+        float best_right_x =  std::numeric_limits<float>::infinity();
+        for (int i = 0; i < 4; i++) {
+            if (!all_lanes[i].valid) continue;
+            float bx = all_lanes[i].bottom_point.x;
+            if (bx < ref_center_normalized && bx > best_left_x) {
+                best_left_x = bx;
+                ego_left_idx = i;
+            } else if (bx > ref_center_normalized && bx < best_right_x) {
+                best_right_x = bx;
+                ego_right_idx = i;
+            }
+        }
+        adas_msg.ego_left_lane_idx  = static_cast<int8_t>(ego_left_idx);
+        adas_msg.ego_right_lane_idx = static_cast<int8_t>(ego_right_idx);
+
+        // Calculate lane departure if both ego boundaries were resolved
+        if (ego_left_idx >= 0 && ego_right_idx >= 0) {
+            const LaneExtrapolation& left_lane  = all_lanes[ego_left_idx];
+            const LaneExtrapolation& right_lane = all_lanes[ego_right_idx];
+
+            float current_lane_midpoint_normalized =
+                (left_lane.bottom_point.x + right_lane.bottom_point.x) / 2.0f;
+            float combined_lane_quality =
+                (left_lane.quality_score + right_lane.quality_score) / 2.0f;
+
+            // Update calibrated camera center (EMA tracks mount offset only —
+            // it converges to the lane midpoint observed under good conditions).
             updateCameraCenter(current_lane_midpoint_normalized * image_width_, combined_lane_quality);
-            
-            // Calculate new deviation in normalized coordinates
+
+            // Deviation is camera-mount-relative-to-lane (uses calibrated center).
+            float camera_center_normalized = getCalibratedCameraCenter() / float(image_width_);
             float deviation_normalized = camera_center_normalized - current_lane_midpoint_normalized;
-            adas_msg.lane_center_offset = deviation_normalized;
-            
-            // Set visualization points in message (normalized coordinates)
+
+            adas_msg.lane_center_offset        = deviation_normalized;
             adas_msg.calibrated_camera_center_x = camera_center_normalized;
-            adas_msg.current_lane_midpoint_x = current_lane_midpoint_normalized;
-            adas_msg.lane_quality_score = combined_lane_quality;
-            
-            // Publish extrapolated lane points for all lanes (normalized coordinates)
-            // Initialize arrays
-            for (int i = 0; i < 4; i++) {
-                adas_msg.lane_top_x[i] = 0.0f;
-                adas_msg.lane_bottom_x[i] = 0.0f;
-                adas_msg.lane_top_y[i] = 0.0f;
-                adas_msg.lane_bottom_y[i] = 0.0f;
-                adas_msg.lane_valid[i] = false;
-            }
-            
-            // Set extrapolated points for all valid lanes
-            for (size_t lane_idx = 0; lane_idx < std::min(size_t(4), lane_polylines.size()); lane_idx++) {
-                if (valid_lane_by_color[lane_idx]) {
-                    LaneExtrapolation lane = extrapolateLane(lane_polylines[lane_idx], max_height_y);
-                    if (lane.valid) {
-                        // Points are already in normalized coordinates
-                        adas_msg.lane_top_x[lane_idx] = lane.top_point.x;
-                        adas_msg.lane_bottom_x[lane_idx] = lane.bottom_point.x;
-                        adas_msg.lane_top_y[lane_idx] = lane.top_point.y;
-                        adas_msg.lane_bottom_y[lane_idx] = lane.bottom_point.y;
-                        adas_msg.lane_valid[lane_idx] = true;
-                    }
-                }
-            }
-            
-            // Determine lane change direction based on deviation (normalized coordinates)
-            float abs_deviation_normalized = std::abs(deviation_normalized);
-            
-            if (abs_deviation_normalized > 0.05f) { // Threshold for lane departure warning (5% of image width)
+            adas_msg.current_lane_midpoint_x    = current_lane_midpoint_normalized;
+            adas_msg.lane_quality_score         = combined_lane_quality;
+
+            if (std::abs(deviation_normalized) > 0.05f) {
                 if (deviation_normalized < 0) {
                     adas_msg.lane_change_left = true;
                 } else {
@@ -329,7 +360,7 @@ public:
                 }
             }
         } else {
-            ROS_DEBUG("Center lane boundaries not available for ADAS processing");
+            ROS_DEBUG("Ego-lane boundaries not available for ADAS processing");
         }
         
         return adas_msg;
@@ -371,6 +402,16 @@ int main(int argc, char **argv) {
     ROS_GET_PARAMETER("image_height", image_height);
     ldw_processor.setImageDimensions(image_width, image_height);
     ROS_INFO("ADAS image dimensions: %dx%d", image_width, image_height);
+
+    // Normalized X position (0..1) of the camera optical center within the
+    // lanedet frame. Default 0.65 = camera is mounted right-of-center on this
+    // rig; lower to 0.5 if a future re-mount centers the lens. Set in
+    // config.yaml under `adas.ros__parameters.ref_center_x_normalized`.
+    double ref_center_x_normalized = 0.65;
+    ROS_DECLARE_PARAMETER("ref_center_x_normalized", ref_center_x_normalized);
+    ROS_GET_PARAMETER("ref_center_x_normalized", ref_center_x_normalized);
+    ldw_processor.setRefCenterXNormalized(static_cast<float>(ref_center_x_normalized));
+    ROS_INFO("ADAS ref_center_x_normalized: %.3f", ldw_processor.getRefCenterXNormalized());
 
     // Create subscribers and publishers
     auto lanes_sub = ROS_CREATE_SUBSCRIBER(visionconnect::msg::Lanes, "lanes_in", 1, lanes_callback);

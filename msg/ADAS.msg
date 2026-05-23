@@ -17,6 +17,12 @@ float32[4] lane_top_y                 # Top Y coordinates for 4 lanes
 float32[4] lane_bottom_y              # Bottom Y coordinates for 4 lanes
 bool[4] lane_valid                    # Which lanes are valid
 
+# Ego-lane boundary channels picked by geometry (which pair of lane indices
+# straddles the camera center at the bottom of the image). -1 = not found.
+# Use these (not hardcoded indices 1/2) to draw the current-lane region.
+int8 ego_left_lane_idx
+int8 ego_right_lane_idx
+
 # Timestamp and metadata
 builtin_interfaces/Time timestamp
 string alert_source              # Source node generating the alert

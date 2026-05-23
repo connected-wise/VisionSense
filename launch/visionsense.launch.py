@@ -134,15 +134,15 @@ def generate_launch_description():
 	# consumed by gui/bev — wrong dims here = tilted lane regions on screen.
 	rotated_lenses = bool(cs_params.get("rotated_lenses", False))
 	adas_img_w, adas_img_h = (1200, 1200) if rotated_lenses else (1440, 900)
+	adas_params = dict(config.get("adas", {}).get("ros__parameters", {}))
+	adas_params["image_width"]  = adas_img_w
+	adas_params["image_height"] = adas_img_h
 	adas_node = Node(
 		package="visionconnect",
 		name="adas",
 		executable="adas",
 		output="screen",
-		parameters=[{
-			"image_width":  adas_img_w,
-			"image_height": adas_img_h,
-		}],
+		parameters=[adas_params],
 		remappings=[
 			("/adas/lanes_in", "/lanedet/lanes")
 		]
@@ -180,19 +180,22 @@ def generate_launch_description():
 	)
 	ld.add_action(camera_stereo_node)
 
-	# Stereo Depth Processing — LightStereo-S / FFS TensorRT (C++ node).
+	# Stereo Depth Processing — Fast-FoundationStereo (FFS) TensorRT (C++ node).
 	#   Subscribes /camera_stereo/{l,r}/image_raw → fused CUDA kernel that does
-	#   rectify (model-resolution remap) + resize to 320×512 + ImageNet norm +
+	#   rectify (model-resolution remap) + resize to model dims + /255 +
 	#   HWC→CHW directly into the TRT input bindings → enqueueV3 inference →
 	#   publishes /stereo_depth/depth (32FC1, metres, native eye res) and
 	#   /stereo_depth/depth_color (BGR8 INFERNO, downsized for cheap viz).
-	# Python fallback (scripts/stereo_depth_lightstereo.py) is still installed
-	# and can be re-pointed here as `executable="stereo_depth_lightstereo.py"`
-	# if the C++ port has issues.
+	#
+	# Production engine: FFS (Fast-FoundationStereo, 320×320, max_disp=64).
+	# Same C++ pipeline can drive LightStereo too — point at the lightstereo
+	# config block and the `stereo_depth` executable for that variant.
+	# Python fallback (scripts/stereo_depth_lightstereo.py) is still installed.
+	#
 	# `calibration_file` is the absolute path resolved above (cs_params).
 	# `engine_file_path` in config.yaml is relative to the installed
 	# graphs/stereo-depth dir — resolve it here.
-	ls_params = dict(config.get("stereo_depth_lightstereo", {}).get("ros__parameters", {}))
+	ls_params = dict(config.get("stereo_depth_ffs", {}).get("ros__parameters", {}))
 	ls_params["calibration_file"] = cs_params["calibration_file"]
 	engine_name = ls_params.get("engine_file_path", "")
 	if engine_name and not os.path.isabs(engine_name):
@@ -203,8 +206,8 @@ def generate_launch_description():
 	stereo_depth_node = Node(
 		package="visionconnect",
 		namespace="stereo_depth",
-		name="stereo_depth_lightstereo",
-		executable="stereo_depth",
+		name="stereo_depth_ffs",
+		executable="stereo_depth_ffs",
 		output="screen",
 		parameters=[ls_params],
 		remappings=[
@@ -214,13 +217,18 @@ def generate_launch_description():
 	)
 	ld.add_action(stereo_depth_node)
 
-	# Bird's Eye View mapping
+	# Bird's Eye View mapping. Inject the absolute calibration_file path so BEV
+	# can load K_left for ground-plane lane projection — same trick as
+	# stereo_depth_ffs above; keeps camera_stereo.calibration_file as the
+	# single source of truth.
+	bev_params = dict(config["bev"]["ros__parameters"])
+	bev_params["calibration_file"] = cs_params["calibration_file"]
 	bev_node = Node(
 		package="visionconnect",
 		name="bev",
 		executable="bev",
 		output="screen",
-		parameters=[config["bev"]["ros__parameters"]],
+		parameters=[bev_params],
 		remappings=[
 			("/bev/detect_in", "/detect/detections"),
 			("/bev/lanes_in", "/lanedet/lanes"),

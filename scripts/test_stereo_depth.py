@@ -369,7 +369,7 @@ def main():
     ap.add_argument("--device", default="/dev/video1")
     ap.add_argument("--engine", default="../src/graphs/stereo-depth/lightstereo_s_320x512.engine")
     ap.add_argument("--calib",  default="../config/stereo_calib.yaml")
-    ap.add_argument("--depth-vmax", type=float, default=20.0,
+    ap.add_argument("--depth-vmax", type=float, default=50.0,
                     help="upper bound (m) for the colormap. 5 m for indoor, "
                          "20+ m for outdoor. Adjustable live via [/] keys.")
     ap.add_argument("--no-rotate", action="store_true",

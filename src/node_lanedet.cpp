@@ -19,7 +19,20 @@ Publisher<visionconnect::msg::Lanes> lanedet_pub = NULL;
 // Globals
 Engine *engine;
 std::vector<int> YS;
-int IMAGE_W, IMAGE_H, CROP;
+int IMAGE_W, IMAGE_H, CROP_START_Y, CROP_HEIGHT;
+float crop_ratio_param = 0.5f;   // bottom half by default; overridden from ROS param
+
+// Preprocessing constants (RGB-channel order). Defaults match the legacy
+// uniform-125 centering; production config switches to BGR ImageNet means.
+std::array<float, 3> pre_sub_rgb = {125.f, 125.f, 125.f};
+std::array<float, 3> pre_div_rgb = {1.f,   1.f,   1.f};
+bool pre_normalize = false;
+
+// CLAHE on the cropped band (luma only). Built lazily on first use.
+bool clahe_enable = false;
+double clahe_clip_limit = 2.0;
+int clahe_tile_grid = 8;
+cv::Ptr<cv::CLAHE> clahe_obj;
 
 std::vector<int> linspace(int start, int end, int num) {
     std::vector<int> result;
@@ -103,25 +116,46 @@ std::vector<std::vector<std::pair<int, int>>> GetLines(const std::vector<cv::Mat
 
 std::vector<std::vector<float>> run_engine(cv::Mat img, const std::string& encoding)
 {
-    // ROI view of the bottom half of the frame; cudaMemcpy2D in the engine
-    // uses img.step so the non-contiguous stride is handled correctly.
-    cv::Mat cropped = img(cv::Rect(0, img.rows / 2, img.cols, CROP));
+    // ROI starting at `CROP_START_Y` (= IMAGE_H * crop_ratio) with height
+    // `CROP_HEIGHT` (the rest of the frame). cudaMemcpy2D in the engine uses
+    // img.step so the non-contiguous stride is handled correctly.
+    cv::Mat cropped = img(cv::Rect(0, CROP_START_Y, img.cols, CROP_HEIGHT));
+
+    // Optional CLAHE on the luma channel of the cropped band. Stabilizes the
+    // input distribution against camera AE / lighting swings without color
+    // shifts. We always clone (CLAHE needs contiguous memory anyway), and the
+    // engine's cudaMemcpy2D uses the new Mat's step so all good.
+    cv::Mat fed = cropped;
+    if (clahe_enable) {
+        cv::Mat ycc;
+        const int code_to_ycc   = (encoding == "bgr8") ? cv::COLOR_BGR2YCrCb : cv::COLOR_RGB2YCrCb;
+        const int code_from_ycc = (encoding == "bgr8") ? cv::COLOR_YCrCb2BGR : cv::COLOR_YCrCb2RGB;
+        cv::cvtColor(cropped, ycc, code_to_ycc);
+        std::vector<cv::Mat> ch;
+        cv::split(ycc, ch);
+        if (!clahe_obj) {
+            clahe_obj = cv::createCLAHE(clahe_clip_limit, cv::Size(clahe_tile_grid, clahe_tile_grid));
+        }
+        clahe_obj->apply(ch[0], ch[0]);
+        cv::merge(ch, ycc);
+        cv::cvtColor(ycc, fed, code_from_ycc);
+    }
 
     const auto &inputDims = engine->getInputDims();
     std::vector<std::vector<cv::Mat>> inputs;
     inputs.reserve(inputDims.size());
     for (size_t k = 0; k < inputDims.size(); ++k) {
-        std::vector<cv::Mat> input(BATCH_SIZE, cropped);
+        std::vector<cv::Mat> input(BATCH_SIZE, fed);
         inputs.emplace_back(std::move(input));
     }
 
     std::vector<std::vector<std::vector<float>>> featureVectors;
-    std::array<float, 3> subVals{125.f, 125.f, 125.f};
-    std::array<float, 3> divVals{1.0f, 1.0f, 1.0f};
-
+    // sub/div are in RGB channel order. The CUDA kernel applies swap_rb FIRST,
+    // so after that step the data is RGB regardless of input encoding and the
+    // RGB-ordered constants are correct in both cases.
     bool success = engine->runInference(inputs, featureVectors,
-                                        subVals, divVals,
-                                        /*normalize=*/false,
+                                        pre_sub_rgb, pre_div_rgb,
+                                        /*normalize=*/pre_normalize,
                                         /*swap_rb=*/(encoding == "bgr8"),
                                         /*aspect_ratio_pad=*/false);
     if (!success)
@@ -224,7 +258,12 @@ void postprocess(std::vector<std::vector<float>> &output, cv::Mat &image)
     // Pass the lane existence scores from output[1]
     auto lines = GetLines(lanes, laneExistenceVector, 0.25);
     
-    float scaleY = (IMAGE_H - CROP) / static_cast<float>(INPUT_H);
+    // Map (x,y) from network input space (INPUT_W × INPUT_H) back into the
+    // full image. Y must use CROP_HEIGHT (the size of the actual crop) and
+    // the offset is CROP_START_Y (where the crop began). The old code used
+    // (IMAGE_H - CROP) for the scale, which only matched CROP_HEIGHT when
+    // the crop was a perfect 50/50 split — any other ratio mislocated lanes.
+    float scaleY = CROP_HEIGHT / static_cast<float>(INPUT_H);
     float scaleX = IMAGE_W / static_cast<float>(INPUT_W);
     size_t lane_index = 0;
     for (const auto& line : lines) {
@@ -232,7 +271,7 @@ void postprocess(std::vector<std::vector<float>> &output, cv::Mat &image)
             int x = point.first;
             int y = point.second;
             x = static_cast<int>(x * scaleX);
-            y = static_cast<int>(y * scaleY + CROP);
+            y = static_cast<int>(y * scaleY + CROP_START_Y);
             lanes_msg.xs.push_back(x);
             lanes_msg.ys.push_back(y);
         }
@@ -268,7 +307,10 @@ void img_callback(const sensor_msgs::msg::Image::SharedPtr input)
 
     IMAGE_W = img.cols;
     IMAGE_H = img.rows;
-    CROP = IMAGE_H/2;
+    // Clamp to a safe range so a bad config can't produce a zero-height crop.
+    float r = std::min(0.95f, std::max(0.0f, crop_ratio_param));
+    CROP_START_Y = static_cast<int>(IMAGE_H * r);
+    CROP_HEIGHT  = IMAGE_H - CROP_START_Y;
 
     if(img.empty())
     {
@@ -313,6 +355,55 @@ int main(int argc, char *argv[])
 
     ROS_DECLARE_PARAMETER("model", model_str);
     ROS_GET_PARAMETER("model", model_str);
+
+    // Horizon crop ratio (fraction of image height skipped from top before
+    // feeding the network). Tune with scripts/lanedet_crop_calibrator.py.
+    double crop_ratio = 0.5;
+    ROS_DECLARE_PARAMETER("crop_ratio", crop_ratio);
+    ROS_GET_PARAMETER("crop_ratio", crop_ratio);
+    crop_ratio_param = static_cast<float>(crop_ratio);
+    ROS_INFO("lanedet crop_ratio = %.3f (= skip top %.0f%% of image)",
+             crop_ratio_param, crop_ratio_param * 100.0f);
+
+    // Preprocessing constants. Vectors in RGB order; defaults preserve the
+    // legacy uniform-125 centering, so absent config = unchanged behavior.
+    std::vector<double> sub_rgb_v = {125.0, 125.0, 125.0};
+    std::vector<double> div_rgb_v = {1.0,   1.0,   1.0};
+    bool normalize_v = false;
+    ROS_DECLARE_PARAMETER("pre_sub_rgb",   sub_rgb_v);
+    ROS_DECLARE_PARAMETER("pre_div_rgb",   div_rgb_v);
+    ROS_DECLARE_PARAMETER("pre_normalize", normalize_v);
+    ROS_GET_PARAMETER("pre_sub_rgb",   sub_rgb_v);
+    ROS_GET_PARAMETER("pre_div_rgb",   div_rgb_v);
+    ROS_GET_PARAMETER("pre_normalize", normalize_v);
+    if (sub_rgb_v.size() == 3) {
+        for (int i = 0; i < 3; ++i) pre_sub_rgb[i] = static_cast<float>(sub_rgb_v[i]);
+    }
+    if (div_rgb_v.size() == 3) {
+        for (int i = 0; i < 3; ++i) pre_div_rgb[i] = static_cast<float>(div_rgb_v[i]);
+    }
+    pre_normalize = normalize_v;
+    ROS_INFO("lanedet preprocess: sub=[%.3f, %.3f, %.3f] div=[%.3f, %.3f, %.3f] /255=%s",
+             pre_sub_rgb[0], pre_sub_rgb[1], pre_sub_rgb[2],
+             pre_div_rgb[0], pre_div_rgb[1], pre_div_rgb[2],
+             pre_normalize ? "yes" : "no");
+
+    // CLAHE on the cropped band (luma channel only, optional).
+    bool clahe_v = false;
+    double clahe_clip_v = 2.0;
+    int    clahe_grid_v = 8;
+    ROS_DECLARE_PARAMETER("clahe_enable",     clahe_v);
+    ROS_DECLARE_PARAMETER("clahe_clip_limit", clahe_clip_v);
+    ROS_DECLARE_PARAMETER("clahe_tile_grid",  clahe_grid_v);
+    ROS_GET_PARAMETER("clahe_enable",     clahe_v);
+    ROS_GET_PARAMETER("clahe_clip_limit", clahe_clip_v);
+    ROS_GET_PARAMETER("clahe_tile_grid",  clahe_grid_v);
+    clahe_enable     = clahe_v;
+    clahe_clip_limit = clahe_clip_v;
+    clahe_tile_grid  = std::max(2, clahe_grid_v);
+    ROS_INFO("lanedet CLAHE: %s (clip=%.2f, tile=%dx%d)",
+             clahe_enable ? "ON" : "off",
+             clahe_clip_limit, clahe_tile_grid, clahe_tile_grid);
 
     engine_path = package_share_directory + "/graphs/lane-detection/" + model_str;
 

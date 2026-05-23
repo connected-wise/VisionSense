@@ -14,15 +14,23 @@
 #include <sensor_msgs/msg/nav_sat_status.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <yaml-cpp/yaml.h>
 #include <deque>
 #include <mutex>
 #include <cmath>
 
-// ---- Camera intrinsics (1200x1200 stereo left image) ----
-static constexpr float CAM_FX = 750.0f;
-static constexpr float CAM_FY = 750.0f;
-static constexpr float CAM_CX = 600.0f;
-static constexpr float CAM_CY = 600.0f;
+// ---- Camera intrinsics ----
+// Loaded from K_left in config/stereo_calib.yaml at startup. Lane points come
+// from lanedet on the *raw* left eye and detection boxes are likewise in raw
+// pixel space, so the raw K_left intrinsics (not P1's rectified ones) are what
+// we need here. Initialized to sane defaults so the node still runs if the
+// calibration is missing — but BEV geometry will be wrong in that case.
+static float g_fx = 868.0f;
+static float g_fy = 868.0f;
+static float g_cx = 720.0f;
+static float g_cy = 450.0f;
+static int   g_image_width  = 1440;
+static int   g_image_height = 900;
 
 // Class-based size priors {length, width} in meters (top-down footprint)
 // Index: 0=pedestrian, 1=cyclist, 2=car, 3=bus, 4=truck, 5=train,
@@ -122,6 +130,50 @@ static float g_gyro_alpha = 0.98f;
 
 Publisher<sensor_msgs::Image> bev_pub = nullptr;
 
+// ---- Calibration loader ----
+// Reads K_left + image dimensions from stereo_calib.yaml using yaml-cpp (the
+// same library node_stereo_depth.cpp uses). cv::FileStorage was tried first
+// but threw `Bad argument: Input file is invalid` because our YAML lacks the
+// OpenCV `%YAML:1.0` header — and crucially the throw came from the
+// constructor, before main() finished setting up subscribers/publishers, so
+// the node failed to start at all. yaml-cpp parses plain YAML fine.
+static bool load_camera_intrinsics(const std::string& calib_path)
+{
+    try {
+        YAML::Node y = YAML::LoadFile(calib_path);
+        auto K = y["K_left"];
+        if (!K || !K["data"]) {
+            ROS_ERROR("BEV: calibration '%s' missing K_left.data — keeping defaults",
+                      calib_path.c_str());
+            return false;
+        }
+        auto data = K["data"].as<std::vector<double>>();
+        if (data.size() < 9) {
+            ROS_ERROR("BEV: K_left.data must have 9 entries, got %zu — keeping defaults",
+                      data.size());
+            return false;
+        }
+        int img_w = y["image_width"]  ? y["image_width"].as<int>()  : 0;
+        int img_h = y["image_height"] ? y["image_height"].as<int>() : 0;
+        if (img_w <= 0 || img_h <= 0) {
+            ROS_ERROR("BEV: calibration '%s' missing image_width/height — keeping defaults",
+                      calib_path.c_str());
+            return false;
+        }
+        g_fx = static_cast<float>(data[0]);
+        g_fy = static_cast<float>(data[4]);
+        g_cx = static_cast<float>(data[2]);
+        g_cy = static_cast<float>(data[5]);
+        g_image_width  = img_w;
+        g_image_height = img_h;
+        return true;
+    } catch (const std::exception& e) {
+        ROS_ERROR("BEV: failed to parse calibration '%s' (%s) — keeping defaults",
+                  calib_path.c_str(), e.what());
+        return false;
+    }
+}
+
 // ---- Helper Functions ----
 
 // Get median depth from a small patch around a pixel
@@ -156,17 +208,22 @@ static float sample_depth(const cv::Mat& depth, int u, int v, int patch_size = 5
 // Returns (X, Z) where X=right, Z=forward in camera frame
 static std::pair<float, float> backproject_to_ground(float u, float v, float depth)
 {
-    float X = (u - CAM_CX) * depth / CAM_FX;
+    (void)v;  // depth carries the Z; v unused here (kept for API stability).
+    float X = (u - g_cx) * depth / g_fx;
     float Z = depth;
     return {X, Z};
 }
 
-// Flat ground assumption: estimate depth from pixel row
+// Flat ground assumption: estimate depth from pixel row using current calibrated
+// intrinsics. Camera frame: y positive points DOWN, ground is at Y=+camera_height
+// below the optical center. From v = cy + fy * H / Z  →  Z = fy * H / (v − cy).
+// Returns -1 if the pixel is above the horizon (v ≤ cy + small margin) where the
+// formula explodes.
 static float flat_ground_depth(float v, float camera_height)
 {
-    float dy = v - CAM_CY;
-    if (dy < 10.0f) return -1.0f;  // Above horizon
-    return CAM_FY * camera_height / dy;
+    float dy = v - g_cy;
+    if (dy < 5.0f) return -1.0f;
+    return g_fy * camera_height / dy;
 }
 
 // Transform ego-local (x_cam, z_cam) to world (ENU) coordinates
@@ -369,8 +426,29 @@ static std::vector<BEVObject> project_detections(const cv::Mat& depth)
     return objects;
 }
 
-static std::vector<std::vector<cv::Point2f>> project_lanes_to_bev(const cv::Mat& depth)
+static std::vector<std::vector<cv::Point2f>> project_lanes_to_bev(const cv::Mat& /*depth*/)
 {
+    // Vanishing-point-anchored ground-plane projection.
+    //
+    // Why VP: parallel real-world lanes converge to a single point in the
+    // image (the vanishing point on the horizon line). ADAS fits each lane
+    // independently, so small slope noise per fit produces small offsets in
+    // the vanishing-point each lane "would" meet — which in BEV gets
+    // amplified into visibly non-parallel lanes. Forcing every lane to pass
+    // through ONE common VP makes them parallel in BEV by construction:
+    // X(Z) = ((vp_x − cx)/fx) · Z  +  (fy·H·(bot_x − vp_x))/(fx · dy_bot)
+    // — linear in Z, same slope (vp_x − cx)/fx across all lanes.
+    //
+    // Why use VP for the horizon row in flat_ground_depth: the formula
+    // Z = fy·H/(v − cy) assumes a perfectly horizontal optical axis. Real
+    // mounts have unknown downward pitch, which shifts the true ground
+    // horizon below cy. The VP we compute IS the projection of the road's
+    // point-at-infinity — so vp_y is the true horizon, accounting for pitch
+    // without ever measuring it. Eliminates the "lanes too short / wrong
+    // depth" symptom that came from using the optical-center cy.
+    //
+    // The depth argument is kept only so the call site doesn't need to
+    // change; stereo depth is intentionally not consulted for lanes.
     std::vector<std::vector<cv::Point2f>> bev_lanes;
     visionconnect::msg::ADAS::SharedPtr adas;
     {
@@ -379,44 +457,89 @@ static std::vector<std::vector<cv::Point2f>> project_lanes_to_bev(const cv::Mat&
     }
     if (!adas) return bev_lanes;
 
-    // Use ADAS extrapolated lane boundaries (normalized coordinates)
-    for (int lane_idx = 0; lane_idx < 4; lane_idx++) {
-        if (!adas->lane_valid[lane_idx]) continue;
+    const float img_w = static_cast<float>(g_image_width);
+    const float img_h = static_cast<float>(g_image_height);
 
-        float top_x = adas->lane_top_x[lane_idx];
-        float top_y = adas->lane_top_y[lane_idx];
-        float bot_x = adas->lane_bottom_x[lane_idx];
-        float bot_y = adas->lane_bottom_y[lane_idx];
+    // Collect valid ADAS lane endpoints (normalized [0,1]).
+    struct LaneSeg { float tx, ty, bx, by; };
+    std::vector<LaneSeg> segs;
+    for (int i = 0; i < 4; i++) {
+        if (!adas->lane_valid[i]) continue;
+        segs.push_back({adas->lane_top_x[i],    adas->lane_top_y[i],
+                        adas->lane_bottom_x[i], adas->lane_bottom_y[i]});
+    }
+    if (segs.empty()) return bev_lanes;
 
-        // Sample 15 points along the lane line
-        const int num_samples = 15;
-        std::vector<cv::Point2f> bev_lane;
-
-        for (int s = 0; s < num_samples; s++) {
-            float t = static_cast<float>(s) / (num_samples - 1);
-            float norm_x = top_x + t * (bot_x - top_x);
-            float norm_y = top_y + t * (bot_y - top_y);
-
-            // Convert normalized [0,1] to depth-image pixel coordinates. This
-            // tracks whatever resolution stereo_depth publishes at, not the
-            // previous hardcoded 1200x1200.
-            float px = norm_x * static_cast<float>(depth.cols);
-            float py = norm_y * static_cast<float>(depth.rows);
-
-            // Get depth at this point
-            float d = sample_depth(depth, static_cast<int>(px), static_cast<int>(py), 3);
-            if (d < 0.0f) {
-                d = flat_ground_depth(py, g_camera_height_m);
+    // Estimate VP via median of pairwise lane-line intersections in image
+    // space. Fall back to (cx, cy) when we only have one lane or all the
+    // lines are nearly parallel in image space (no intersection).
+    float vp_x_n = g_cx / img_w;
+    float vp_y_n = g_cy / img_h;
+    if (segs.size() >= 2) {
+        std::vector<float> ys, xs;
+        ys.reserve(segs.size() * (segs.size() - 1) / 2);
+        xs.reserve(ys.capacity());
+        for (size_t i = 0; i < segs.size(); ++i) {
+            for (size_t j = i + 1; j < segs.size(); ++j) {
+                const auto& a = segs[i]; const auto& b = segs[j];
+                float dya = a.by - a.ty, dyb = b.by - b.ty;
+                if (std::abs(dya) < 1e-3f || std::abs(dyb) < 1e-3f) continue;
+                float ma = (a.bx - a.tx) / dya;        // dx/dy slope in image
+                float mb = (b.bx - b.tx) / dyb;
+                if (std::abs(ma - mb) < 1e-4f) continue; // parallel in image
+                float ca = a.tx - ma * a.ty;
+                float cb = b.tx - mb * b.ty;
+                float y = (cb - ca) / (ma - mb);
+                float x = ma * y + ca;
+                if (y < 0.0f || y > 1.0f || x < -0.5f || x > 1.5f) continue;
+                ys.push_back(y); xs.push_back(x);
             }
-            if (d < 0.5f || d > g_max_bev_range_m) continue;
+        }
+        if (!ys.empty()) {
+            std::sort(ys.begin(), ys.end());
+            std::sort(xs.begin(), xs.end());
+            vp_y_n = ys[ys.size() / 2];
+            vp_x_n = xs[xs.size() / 2];
+            // Clamp to a sane band — the road horizon can't be at the very
+            // top or bottom of the image. 0.20..0.80 covers extreme pitches.
+            vp_y_n = std::clamp(vp_y_n, 0.20f, 0.80f);
+        }
+    }
 
-            auto [X, Z] = backproject_to_ground(px, py, d);
+    const float vp_x_pixel = vp_x_n * img_w;
+    const float vp_y_pixel = vp_y_n * img_h;
+
+    // Project each lane through the VP. Sampling is uniform in 1/Z (= uniform
+    // in image-y below the horizon), which gives a roughly even distribution
+    // in BEV pixels rather than bunching at the close end.
+    for (const auto& s : segs) {
+        float bot_x_pixel = s.bx * img_w;
+        float bot_y_pixel = s.by * img_h;
+        float dy_bot = bot_y_pixel - vp_y_pixel;
+        if (dy_bot < 10.0f) continue;        // bot point not safely below horizon
+
+        float Z_close = g_fy * g_camera_height_m / dy_bot;
+        float Z_far   = std::max(Z_close + 0.5f, g_max_bev_range_m);
+        if (Z_close < 0.3f) Z_close = 0.3f;
+
+        const int num_samples = 18;
+        const float inv_z_close = 1.0f / Z_close;
+        const float inv_z_far   = 1.0f / Z_far;
+
+        std::vector<cv::Point2f> bev_lane;
+        bev_lane.reserve(num_samples);
+        for (int n = 0; n < num_samples; ++n) {
+            float t = n / float(num_samples - 1);
+            float inv_z = inv_z_close + t * (inv_z_far - inv_z_close);
+            float Z = 1.0f / inv_z;
+            // λ interpolates along the line from VP (λ=0, Z=∞) to bot
+            // (λ=1, Z=Z_close): py(λ) = vp_y + λ·dy_bot → λ = (fy·H/Z)/dy_bot
+            float lambda = (g_fy * g_camera_height_m) / (Z * dy_bot);
+            float px = vp_x_pixel + lambda * (bot_x_pixel - vp_x_pixel);
+            float X = (px - g_cx) * Z / g_fx;
             bev_lane.push_back(cv::Point2f(X, Z));
         }
-
-        if (bev_lane.size() >= 2) {
-            bev_lanes.push_back(bev_lane);
-        }
+        if (bev_lane.size() >= 2) bev_lanes.push_back(bev_lane);
     }
     return bev_lanes;
 }
@@ -726,6 +849,23 @@ int main(int argc, char** argv)
     double ga;
     node->get_parameter("gyro_alpha", ga);
     g_gyro_alpha = static_cast<float>(ga);
+
+    // Calibration → camera intrinsics. Defaults to stereo_calib.yaml in the
+    // installed config dir (same file that stereo_depth uses), but absolute
+    // paths are honored. BEV uses the *raw* K_left because lanedet + detect
+    // operate on the raw left eye (not rectified).
+    std::string calibration_file = "stereo_calib.yaml";
+    node->declare_parameter("calibration_file", calibration_file);
+    node->get_parameter("calibration_file", calibration_file);
+    std::string calib_path = calibration_file;
+    if (!calib_path.empty() && calib_path[0] != '/') {
+        calib_path = ament_index_cpp::get_package_share_directory("visionconnect")
+                   + "/config/" + calibration_file;
+    }
+    if (load_camera_intrinsics(calib_path)) {
+        ROS_INFO("BEV intrinsics from '%s': fx=%.1f fy=%.1f cx=%.1f cy=%.1f img=%dx%d",
+                 calib_path.c_str(), g_fx, g_fy, g_cx, g_cy, g_image_width, g_image_height);
+    }
 
     ROS_INFO("BEV Node: %dx%d @ %d Hz, %.1f px/m, range %.1fm",
              g_bev_width, g_bev_height, render_rate_hz, g_pixels_per_meter, g_max_bev_range_m);
