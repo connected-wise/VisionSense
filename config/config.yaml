@@ -3,6 +3,17 @@ ui:
     display:   false     # native cv::imshow GUI window (node_gui composite)
     dashboard: true     # auto-open Chromium in kiosk mode to the dashboard URL
 
+# Hardware variant. Each release branch (VisionSense_<board>_<layout>) sets
+# these for its rig; see README "Hardware variants".
+hardware:
+    layout: "2F1R"      # "2F1R": stereo forward + mono camera facing the driver
+                        # "3F0R": stereo + mono camera all forward; 2D
+                        #         perception runs on the mono camera
+                        #         (/camera/raw), no driver monitor
+    # 3F0R only: mono camera intrinsics (same YAML format as
+    # camera_stereo.calibration_file) for BEV. Empty = BEV built-in defaults.
+    mono_calibration_file: ""
+
 # Single-eye topic routing for downstream consumers (detect/lanedet/gui/dashboard).
 # stereo_depth ignores this and always uses both eyes.
 stereo:
