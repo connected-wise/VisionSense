@@ -4,9 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-VisionSense (package name `visionconnect`) is a ROS2 Humble computer vision system for autonomous vehicles on NVIDIA Jetson Orin Nano/NX. Object detection, traffic-sign classification, lane detection, stereo depth, driver monitoring, BEV mapping, GPS/IMU fusion, web dashboard, native GUI — all wired into a single launch graph.
+VisionSense (package name `visionconnect`) is a ROS2 computer vision system for autonomous vehicles on NVIDIA Jetson Orin Nano/NX. Object detection, traffic-sign classification, lane detection, stereo depth, driver monitoring, BEV mapping, GPS/IMU fusion, web dashboard, native GUI — all wired into a single launch graph.
 
-Hardware target: **Jetson Orin NX 16 GB** with JetPack 6.2 (CUDA 12.6, TensorRT 10, OpenCV 4.8). Cameras: Arducam dual-AR0234 stereo (3840×1200 over `/dev/video1`) + IMX219 mono CSI (driver-monitor).
+Hardware targets:
+- **Jetson Orin NX 16 GB**, JetPack 6.2 (Ubuntu 22.04, ROS 2 Humble, CUDA 12.6, TensorRT 10.3, OpenCV 4.8), IMX219 driver cam.
+- **Jetson Orin Nano Super 8 GB**, JetPack 7.2 (Ubuntu 24.04, ROS 2 Jazzy, CUDA 13.2, TensorRT 10.16, OpenCV 4.8), IMX477 driver cam.
+
+Cameras: Arducam dual-AR0234 stereo (3840×1200 on CAM1, `/dev/video1` / `/dev/video-stereo`) + IMX219 or IMX477 mono CSI on CAM0 (driver-monitor, Argus `csi://0`). `install_all_deps.sh` takes `VS_DRIVER_CAM=imx219|imx477` to pick the overlay in `overlays/`. Code and scripts must work on both distros: never hardcode `humble`, `/home/jetson` or a CUDA version.
+
+Hardware variants live on release branches `VisionSense_<Nano|NX>_<2F1R|3F0R>` (see README "Hardware variants"). The code is shared; the branches differ only in defaults such as `hardware.layout` in `config/config.yaml`, which `launch/visionsense.launch.py` reads: in 3F0R the mono camera faces forward, 2D perception reads `/camera/raw`, and `driver_monitor` is not launched. Make fixes on the shared code and merge them into every variant branch.
+
+The dashboard process must not link jetson-utils: it links libsoup-2.4, and webrtcbin pulls in libsoup-3.0 on Ubuntu 24.04, which aborts the process when a browser opens a stream.
 
 ## Build, Run, Test
 
@@ -137,7 +145,7 @@ All are referenced from `CMakeLists.txt` `rosidl_generate_interfaces` block.
 
 - C++17, `-Ofast`, CUDA arch 87 (Orin).
 - No `cv::cuda::*` — write raw CUDA kernels in `src/cuda/`. The existing `stereo_rotate.cu`, `preprocess.cu`, and `stereo_rectify.cu` are the templates.
-- TRT engines are **not portable** across Jetson units / TRT versions. Regenerate from ONNX on the target device.
+- TRT engines are **not portable** across Jetson units / TRT versions. Regenerate from ONNX on the target device with `scripts/regenerate_engines.sh`, then rebuild (engines are installed into `share/` at build time).
 - C++ TRT pattern: deserialize → `setTensorAddress` → `cudaMallocAsync` GPU buffers → `cudaMemcpyAsync` H→D → `enqueueV3(stream)` → `cudaMemcpyAsync` D→H → `cudaStreamSynchronize`. See `src/node_driver_monitor.cpp` for the canonical example and `src/node_stereo_depth.cpp` for the two-input variant.
 - Don't add throttled logging — `ROS_WARN_THROTTLE` etc. are not defined in `ros_compat.h`. Gate with `(frame_count_ % N) == 0` instead.
 

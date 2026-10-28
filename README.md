@@ -23,7 +23,7 @@ https://github.com/user-attachments/assets/8b5bfc2b-9bf6-4562-895b-04ba0c5b41e3
 
 ## Overview
 
-VisionSense is a comprehensive ROS2-based computer vision system designed for autonomous vehicles running on NVIDIA Jetson platforms with JetPack 6.2. It provides a complete perception pipeline with real-time object detection, lane detection, traffic sign recognition, stereo depth estimation, and driver monitoring capabilities.
+VisionSense is a comprehensive ROS2-based computer vision system designed for autonomous vehicles running on NVIDIA Jetson platforms with JetPack 6.2 or 7.2. It provides a complete perception pipeline with real-time object detection, lane detection, traffic sign recognition, stereo depth estimation, and driver monitoring capabilities.
 
 ## Features
 
@@ -94,11 +94,44 @@ VisionSense is a comprehensive ROS2-based computer vision system designed for au
 | Component | Requirement |
 |-----------|-------------|
 | **Hardware** | NVIDIA Jetson Orin Nano/NX/AGX |
-| **OS** | Ubuntu 22.04 (JetPack 6.2) |
-| **ROS2** | Humble Hawksbill |
-| **CUDA** | 12.6+ |
-| **TensorRT** | 10.x |
-| **OpenCV** | 4.x with CUDA support |
+| **JetPack** | 6.2 (L4T R36) or 7.2 (L4T R39) |
+| **OS** | Ubuntu 22.04 (JetPack 6.2) / Ubuntu 24.04 (JetPack 7.2) |
+| **ROS2** | Humble (JetPack 6.2) / Jazzy (JetPack 7.2) |
+| **CUDA** | 12.6 (JetPack 6.2) / 13.2 (JetPack 7.2) |
+| **TensorRT** | 10.3 (JetPack 6.2) / 10.16 (JetPack 7.2) |
+| **OpenCV** | 4.8 from JetPack (no CUDA modules needed) |
+| **Cameras** | Arducam AR0234 sync stereo (B0577) on CAM1 + IMX219 or IMX477 on CAM0 |
+
+### Hardware variants
+
+Each supported rig has its own release branch, named
+`VisionSense_<board>_<layout>`. Clone the branch for your hardware:
+
+| Branch | Board | Layout | Status |
+|--------|-------|--------|--------|
+| `VisionSense_Nano_2F1R` | Orin Nano | 2F1R | Tested (Orin Nano Super, JetPack 7.2.1) |
+| `VisionSense_Nano_3F0R` | Orin Nano | 3F0R | Tested on the bench; lane, ADAS and BEV tuning for a forward IMX477 still to do |
+| `VisionSense_NX_2F1R` | Orin NX | 2F1R | Placeholder: same code as the Nano branch, not yet adapted or tested on an Orin NX |
+| `VisionSense_NX_3F0R` | Orin NX | 3F0R | Placeholder: same code as the Nano branch, not yet adapted or tested on an Orin NX |
+
+The layout says how many cameras face forward (F) and to the rear/cabin (R):
+
+- **2F1R**: the AR0234 stereo pair faces forward, and the mono CSI camera on
+  CAM0 faces the driver. 2D perception (detection, signs, lanes, ADAS, BEV,
+  fused view) runs on the stereo main eye, and the driver monitor runs on the
+  mono camera.
+- **3F0R**: the stereo pair and the mono camera all face forward. 2D
+  perception runs on the mono camera (`/camera/raw`), the stereo pair only
+  produces depth, and there is no driver monitor. Set
+  `hardware.mono_calibration_file` to the mono camera's intrinsics for
+  accurate BEV distances.
+
+The layout is the `hardware.layout` setting in `config/config.yaml`, so a
+checkout can be switched without changing branch.
+
+```bash
+git clone -b VisionSense_Nano_2F1R https://github.com/connected-wise/VisionSense.git
+```
 
 ---
 
@@ -381,6 +414,12 @@ Web-based monitoring interface accessible via browser.
 - Detection statistics
 - System status
 
+Video goes to the browser over WebRTC as H.264. The dashboard uses the NVENC
+hardware encoder (`nvv4l2h264enc`) when the board has one and falls back to
+software `x264enc` otherwise. The Orin Nano has no NVENC, and JetPack 7.2 does
+not ship `nvv4l2h264enc`. Software encoding costs CPU while a browser is
+watching (about 75% across all six cores on an Orin Nano).
+
 ---
 
 ## Installation
@@ -394,20 +433,25 @@ cd VisionSense
 
 ### Step 2: Install ROS2 and Project Dependencies
 
-Install ROS2 Humble, jetson-inference, and all required libraries:
+Install ROS2 (Humble on JetPack 6.2, Jazzy on JetPack 7.2 — picked from the
+Ubuntu release), jetson-inference, and all required libraries. Run it as your
+normal user (it calls sudo itself) so the service and paths are set up for
+that user. Set `VS_DRIVER_CAM` to the driver-monitor camera on CAM0:
 
 ```bash
-sudo bash install_all_deps.sh
+bash install_all_deps.sh                      # IMX219 on CAM0 (default)
+VS_DRIVER_CAM=imx477 bash install_all_deps.sh # IMX477 on CAM0
 ```
 
 This script installs:
-- ROS2 Humble desktop and vision packages
+- ROS2 desktop and vision packages for the detected distro
 - Build tools (cmake, colcon, etc.)
 - jetson-inference library
 - Python dependencies (numpy, pyserial)
 - System libraries (Eigen3, V4L utilities, **yaml-cpp**)
 - The system OpenCV (`libopencv-dev`, ~4.8 from JetPack) — no source build required
-- **Arducam camera driver** + device-tree overlay (combined AR0234 stereo + IMX219 mono)
+- **Arducam camera driver** + device-tree overlay (combined AR0234 stereo + IMX219 or IMX477 mono, from `overlays/`). On JetPack 7.2 Arducam's installer has no Orin Nano entry, so the script installs Arducam's T234 (Orin NX) build for the running kernel, which is the same package the Orin Nano uses on JetPack 6.2. The boot entry sets `FDT` to the board's own `/boot/dtb/kernel_*.dtb`, because the UEFI launcher ignores `OVERLAYS` without it.
+- **udev rules** for `/dev/video-mono` and `/dev/video-stereo`
 - **`nvargus-daemon` override** (`enableCamInfiniteTimeout=1`) to avoid CSI buffer wedge on disconnect
 - **Kernel UDP buffers** (`/etc/sysctl.d/99-ros2-fastdds.conf`, 16 MB) — required for stereo @ 30 Hz
 - **`visionsense-imx219.service`** systemd unit + passwordless sudoers rule. This unit owns the IMX219 driver-monitor camera for the entire system uptime (workaround for an Argus reopen bug on this rig — every second `nvarguscamerasrc` session fails until reboot otherwise). VisionSense subscribes to `/camera/raw` as a normal ROS topic.
@@ -416,24 +460,28 @@ This script installs:
 
 ### Step 3: TensorRT Engines
 
-The `.engine` files checked into the repo were built on this device's
-Jetson+TensorRT version. **They will not load on a different device until
-rebuilt from their ONNX source.**
+The `.engine` files checked into the repo were built on a JetPack 6.2
+Jetson (TensorRT 10.3). **They will not load on a different TensorRT version
+(e.g. JetPack 7.2) until rebuilt from their ONNX source.** Rebuild every
+engine the launch graph uses (detection, sign classifier, lanes, face, gaze,
+Fast-FoundationStereo) on the target device:
 
-The active stereo backend (LightStereo-S) uses
-`src/graphs/stereo-depth/lightstereo_s_320x512.engine`. To rebuild it on a
-fresh Jetson, see "Engine generation" in the [Stereo Depth Node](#3-stereo-depth-node-stereo_depth_lightstereopy)
-section above.
+```bash
+bash scripts/regenerate_engines.sh            # all engines (~15-25 min)
+bash scripts/regenerate_engines.sh classify   # or just some
+```
 
-Detection/classification/face/gaze engines under `src/graphs/object-detection`,
-`src/graphs/classifier`, `src/graphs/driver-monitor`, etc. each have their own
-ONNX source. The legacy FFS regeneration recipe is preserved in
-`archive/scripts/regenerate_engines.sh` if you ever want it back.
+The previous engines are kept as `<name>.prev.<timestamp>`. The legacy
+plugin-based FFS and LightStereo recipes are preserved in
+`archive/scripts/regenerate_engines.sh`.
 
 ### Step 4: Build VisionSense
 
+Build after rebuilding engines: the build installs `src/graphs` into
+`install/share/visionconnect/graphs`, which is where the nodes load them from.
+
 ```bash
-source /opt/ros/humble/setup.bash
+source /opt/ros/$ROS_DISTRO/setup.bash   # humble or jazzy
 colcon build --packages-select visionconnect
 ```
 
@@ -561,10 +609,11 @@ Double-click the **VisionSense** icon on the desktop.
 
 ### Command Line
 ```bash
-source /opt/ros/humble/setup.bash
-cd ~/VisionSense && source install/setup.bash
-ros2 launch visionconnect visionsense.launch.py
+cd ~/VisionSense && ./launch_visionsense.sh
 ```
+
+The script sources the right ROS distro and sets the DDS profile; plain
+`ros2 launch visionconnect visionsense.launch.py` skips those.
 
 ### Individual Nodes
 ```bash
@@ -672,7 +721,7 @@ colcon build --packages-select visionconnect
 ### TensorRT Issues
 Ensure models are built for your specific Jetson platform (engine files are not portable across Jetson + TensorRT versions).
 
-For the stereo depth engine, rebuild `lightstereo_s_320x512.engine` from the LightStereo-S ONNX — see the [Stereo Depth Node](#3-stereo-depth-node-stereo_depth_lightstereopy) section for the OpenStereo export + trtexec recipe.
+Rebuild them with `bash scripts/regenerate_engines.sh`, then rebuild the workspace. A node failing with `deserializeCudaEngine` / version-mismatch errors right after a JetPack change means its engine is still the old one.
 
 ## License
 
