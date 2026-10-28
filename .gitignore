@@ -16,3 +16,6 @@ config/calibration.yaml
 config/stereo_calib.yaml.tz*
 scripts/stereo_calib_rectified_sample.png
 testing/rectified_samples/
+
+# Engine backups written by scripts/regenerate_engines.sh
+*.engine.prev.*

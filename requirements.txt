@@ -1,6 +1,8 @@
-# Python dependencies for VisionConnect-Plus on JetPack 6.2
+# Python dependencies for VisionConnect-Plus on JetPack 6.2 / 7.2
 
-# Core Python packages (install via pip3)
+# Core Python packages. install_all_deps.sh installs these from apt
+# (python3-numpy, python3-serial); on Ubuntu 24.04 a system-wide pip3
+# install is refused (externally managed Python).
 numpy>=1.21.0
 pyserial>=3.5  # For GPS script communication
 
@@ -13,8 +15,8 @@ pyserial>=3.5  # For GPS script communication
 # # ROS2 Python dependencies
 # sudo apt install -y \
 #     python3-rosidl-generator-py \
-#     ros-humble-rosidl-typesupport-introspection-cpp \
-#     ros-humble-rosidl-typesupport-introspection-c
+#     ros-$ROS_DISTRO-rosidl-typesupport-introspection-cpp \
+#     ros-$ROS_DISTRO-rosidl-typesupport-introspection-c
 # 
 # # Python development packages
 # sudo apt install -y \

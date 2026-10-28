@@ -22,14 +22,26 @@ if [ -z "${XAUTHORITY:-}" ]; then
     done
 fi
 
+# Workspace = the directory holding this script, so the checkout works under
+# any user (jetson, vision2x, ...) and any path.
+VS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ROS 2 distro: jazzy on JetPack 7.2 (Ubuntu 24.04), humble on JetPack 6.2.
+if [ -z "${ROS_DISTRO:-}" ]; then
+    for d in jazzy humble; do
+        [ -f "/opt/ros/$d/setup.bash" ] && ROS_DISTRO=$d && break
+    done
+fi
+
 # FastDDS shared-memory transport profile. Required to avoid right-eye packet
 # loss when both /camera_stereo/{left,right}/image_raw (4.32 MB each @ 30 Hz)
 # flow simultaneously — the default 512 KB SHM segment can't hold two stereo
 # images, and Humble's FastDDS (2.6.x) does NOT support the `LARGE_DATA?...`
 # query-string env-var syntax used by newer ROS2 distros (logs "Wrong value
 # for environment variable 'FASTDDS_BUILTIN_TRANSPORTS'" and falls back to
-# DEFAULT, which is exactly the bug we're trying to avoid).
-export FASTRTPS_DEFAULT_PROFILES_FILE=/home/jetson/VisionSense/fastdds_profile.shm.xml
+# DEFAULT, which is exactly the bug we're trying to avoid). The profile file
+# works on both Humble and Jazzy, so it stays the single mechanism.
+export FASTRTPS_DEFAULT_PROFILES_FILE="$VS_DIR/fastdds_profile.shm.xml"
 
 # Stale /dev/shm/fastrtps_* segments from previously-killed runs choke DDS
 # discovery — subscribers log "ready" but their callbacks never fire. Wipe
@@ -39,10 +51,10 @@ if ! pgrep -af "lib/visionconnect|stereo_depth_lightstereo" >/dev/null 2>&1; the
 fi
 
 # Change to workspace directory
-cd /home/jetson/VisionSense
+cd "$VS_DIR"
 
 # Source ROS2 environment
-source /opt/ros/humble/setup.bash
+source "/opt/ros/$ROS_DISTRO/setup.bash"
 source install/setup.bash
 
 # Launch VisionSense

@@ -1,6 +1,11 @@
 #!/bin/bash
-# Comprehensive installation script for VisionSense on JetPack 6.2
+# Comprehensive installation script for VisionSense on JetPack 6.2 (Ubuntu
+# 22.04, ROS 2 Humble) and JetPack 7.2 (Ubuntu 24.04, ROS 2 Jazzy).
 # Run with: bash install_all_deps.sh
+#
+# The driver-monitor camera on CAM0 picks the device-tree overlay:
+#   VS_DRIVER_CAM=imx219 (default) or VS_DRIVER_CAM=imx477, e.g.
+#   VS_DRIVER_CAM=imx477 bash install_all_deps.sh
 
 set -e  # Exit on error
 
@@ -11,8 +16,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "======================================"
 echo "VisionConnect-Plus Dependency Installer"
-echo "For JetPack 6.2 on NVIDIA Jetson"
+echo "For JetPack 6.2 / 7.2 on NVIDIA Jetson"
 echo "======================================"
+
+# The ROS 2 distro follows the Ubuntu release JetPack ships.
+UBUNTU_CODENAME=$(. /etc/os-release && echo "$UBUNTU_CODENAME")
+case "$UBUNTU_CODENAME" in
+    jammy) ROS_DISTRO=humble ;;   # JetPack 6.2, L4T R36
+    noble) ROS_DISTRO=jazzy ;;    # JetPack 7.2, L4T R39
+    *)
+        echo "Unsupported Ubuntu release '$UBUNTU_CODENAME' (expected jammy or noble)"
+        exit 1
+        ;;
+esac
+echo "Ubuntu $UBUNTU_CODENAME -> ROS 2 $ROS_DISTRO"
+
+VS_DRIVER_CAM="${VS_DRIVER_CAM:-imx219}"
+case "$VS_DRIVER_CAM" in
+    imx219|imx477) ;;
+    *)
+        echo "VS_DRIVER_CAM must be imx219 or imx477 (got '$VS_DRIVER_CAM')"
+        exit 1
+        ;;
+esac
+echo "Driver-monitor camera on CAM0: $VS_DRIVER_CAM"
 
 # Check if running on Jetson
 if [ ! -f /etc/nv_tegra_release ]; then
@@ -31,30 +58,32 @@ check_package() {
 
 # Function to check if ROS2 is sourced
 check_ros2() {
-    if [ -z "$ROS_DISTRO" ]; then
-        if [ -f /opt/ros/humble/setup.bash ]; then
-            source /opt/ros/humble/setup.bash
-        fi
+    if [ -f "/opt/ros/$ROS_DISTRO/setup.bash" ]; then
+        # ROS setup scripts reference unset variables; don't let set -u-style
+        # callers or our own set -e trip on them.
+        set +e
+        source "/opt/ros/$ROS_DISTRO/setup.bash"
+        set -e
     fi
 }
 
 echo -e "\n1. Updating package lists..."
 sudo apt update
 
-echo -e "\n2. Installing ROS2 Humble..."
-if ! check_package ros-humble-desktop; then
+echo -e "\n2. Installing ROS2 ${ROS_DISTRO^}..."
+if ! check_package ros-$ROS_DISTRO-desktop; then
     sudo apt install -y software-properties-common
     sudo add-apt-repository universe
     sudo apt update && sudo apt install -y curl
     sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
     sudo apt update
-    sudo apt install -y ros-humble-desktop
+    sudo apt install -y ros-$ROS_DISTRO-desktop
 fi
 
 echo -e "\n3. Installing ROS2 additional packages..."
 sudo apt install -y \
-    ros-humble-vision-msgs \
+    ros-$ROS_DISTRO-vision-msgs \
     python3-colcon-common-extensions \
     python3-rosdep \
     python3-vcstool
@@ -74,10 +103,11 @@ sudo apt install -y \
     python3-pip \
     python3-numpy \
     python3-opencv \
+    python3-serial \
     python3-ament-package \
-    ros-humble-rosidl-generator-py \
-    ros-humble-rosidl-typesupport-introspection-cpp \
-    ros-humble-rosidl-typesupport-introspection-c
+    ros-$ROS_DISTRO-rosidl-generator-py \
+    ros-$ROS_DISTRO-rosidl-typesupport-introspection-cpp \
+    ros-$ROS_DISTRO-rosidl-typesupport-introspection-c
 
 echo -e "\n6. Installing system libraries..."
 sudo apt install -y \
@@ -94,10 +124,11 @@ sudo apt install -y \
     v4l-utils \
     libopencv-dev \
     libwebsockets-dev \
-    libyaml-cpp-dev
+    libyaml-cpp-dev \
+    device-tree-compiler
 
 echo -e "\n7. Verifying OpenCV..."
-# VisionSense uses the system OpenCV that ships with JetPack 6.2 (no CUDA
+# VisionSense uses the system OpenCV that ships with JetPack (4.8, no CUDA
 # modules). The cv::cuda::* ops the older codebase relied on were replaced
 # with raw CUDA kernels in src/cuda/preprocess.cu and src/cuda/stereo_rotate.cu,
 # so an OpenCV-from-source build is no longer required.
@@ -111,21 +142,28 @@ else
 fi
 
 echo -e "\n8. Setting up environment variables..."
-cat >> ~/.bashrc << 'EOL'
+# /usr/local/cuda points at the CUDA JetPack installed (12.6 on JetPack 6.2,
+# 13.x on JetPack 7.2). Guarded so re-running the installer doesn't stack
+# duplicate blocks in ~/.bashrc.
+if ! grep -q "# VisionSense environment" ~/.bashrc; then
+cat >> ~/.bashrc << EOL
 
-# ROS2 Humble
-if [ -f /opt/ros/humble/setup.bash ]; then
-    source /opt/ros/humble/setup.bash
+# VisionSense environment
+if [ -f /opt/ros/$ROS_DISTRO/setup.bash ]; then
+    source /opt/ros/$ROS_DISTRO/setup.bash
 fi
 
-# CUDA (JetPack 6.2)
-export PATH=/usr/local/cuda-12.6/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-12.6/lib64:$LD_LIBRARY_PATH
+# CUDA
+export PATH=/usr/local/cuda/bin:\$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:\$LD_LIBRARY_PATH
 
 # Jetson libraries
-export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/tegra:$LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu/tegra:\$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/lib:\$LD_LIBRARY_PATH
 EOL
+else
+    echo "✓ ~/.bashrc already has the VisionSense environment block"
+fi
 
 echo -e "\n9. Configuring gpsd for GPS module..."
 if [ -f /etc/default/gpsd ]; then
@@ -154,8 +192,10 @@ else
 fi
 
 echo -e "\n10. Installing Python packages..."
-pip3 install --upgrade pip
-pip3 install numpy pyserial
+# numpy and pyserial come from apt (step 5: python3-numpy, python3-serial).
+# Ubuntu 24.04 marks the system Python as externally managed, so a system-wide
+# `pip3 install` fails there; apt works on both JetPack releases.
+python3 -c "import numpy, serial; print('✓ numpy', numpy.__version__, '/ pyserial', serial.VERSION)"
 
 echo -e "\n11. Fixing npymath library for newer NumPy versions..."
 # NumPy >= 1.24 moved/removed npymath from standard paths, causing jetson-inference build to fail
@@ -178,8 +218,13 @@ if [ ! -d "/usr/local/include/jetson-utils" ]; then
         git clone --recursive --depth=1 https://github.com/dusty-nv/jetson-inference
     fi
     cd jetson-inference
+    if [ "$UBUNTU_CODENAME" = "noble" ]; then
+        # JetPack 7.2 (Ubuntu 24.04, GCC 13, CUDA 13) needs a few build fixes;
+        # see the script for the list.
+        bash "${SCRIPT_DIR}/scripts/patch_jetson_inference_cuda13.sh" "$PWD"
+    fi
     mkdir -p build && cd build
-    cmake ../
+    cmake -DBUILD_INTERACTIVE=NO ../
     make -j$(nproc)
     sudo make install
     sudo ldconfig
@@ -208,6 +253,28 @@ if [ ! -d "/boot/arducam" ]; then
     # in place and skipping that prompt is the right default.
     echo "n" | sudo ./install_full.sh -m arducam_4lane || \
         echo "  (Arducam installer returned non-zero — may be a pre-existing kernel mismatch; check /boot/arducam manually)"
+
+    # On L4T R39 (JetPack 7.2) Arducam's package list has arducam_4lane builds
+    # only under Orin NX, so install_full.sh rejects an Orin Nano. The Orin NX
+    # and Orin Nano share the T234 SoC and the L4T kernel, and the package is
+    # keyed by the exact nvidia-l4t-kernel version, so install that build
+    # directly. (On R36 the Orin Nano entry already points at the same
+    # t234-nx package.)
+    if [ ! -f /boot/arducam/Image ]; then
+        L4T_KERNEL=$(dpkg-query --showformat='${Version}' --show nvidia-l4t-kernel)
+        wget -q -O arducam_4lane_links.txt \
+            https://github.com/ArduCAM/MIPI_Camera/releases/download/v0.0.3/arducam_4lane_links.txt || true
+        ARDUCAM_DEB_URL=$(grep -F "orin_nx_download_links[\"$L4T_KERNEL\"]" arducam_4lane_links.txt 2>/dev/null \
+            | head -1 | sed -E 's/.*="([^"]+)".*/\1/')
+        if [ -n "$ARDUCAM_DEB_URL" ]; then
+            echo "  Installing Arducam's T234 build for kernel $L4T_KERNEL:"
+            echo "    $ARDUCAM_DEB_URL"
+            wget -q "$ARDUCAM_DEB_URL" -O arducam-4lane.deb && sudo dpkg -i arducam-4lane.deb || \
+                echo "  ✗ Arducam package install failed"
+        else
+            echo "  ✗ No Arducam arducam_4lane package for kernel $L4T_KERNEL"
+        fi
+    fi
     cd "$SCRIPT_DIR"
     rm -rf "$ARDUCAM_TMP" /tmp/MIPI_Camera
     echo "✓ Arducam drivers installed (reboot required after script completes)"
@@ -216,26 +283,31 @@ else
 fi
 
 echo -e "\n14. Installing camera device tree overlay..."
-# Combined overlay for AR0234 stereo camera + IMX219 rear camera.
-# Works on every Orin variant the AR0234+IMX219 combo runs on:
+# Combined overlay for the AR0234 stereo camera (CAM1) + the driver-monitor
+# camera on CAM0, picked with VS_DRIVER_CAM:
+#   imx219 -> overlays/tegra234-p3767-camera-p3768-arducam-imx219-combined.dts
+#   imx477 -> overlays/tegra234-p3767-camera-p3768-arducam-imx477-combined.dts
+# Works on every Orin variant the combo runs on:
 #   - Orin Nano 4GB / 8GB / 8GB Super, Orin NX 8GB / 16GB
 #   - Rootfs on either SD card (/dev/mmcblk0p1) or NVMe (root=PARTUUID=...)
-# The trick is: don't hardcode root=, kernel flags, or FDT. Derive everything
-# from the primary boot entry that's already working on this machine.
-OVERLAY_SRC="${SCRIPT_DIR}/overlays/tegra234-p3767-camera-p3768-arducam-imx219-combined.dts"
+# The trick is: don't hardcode root= or kernel flags. Derive them from the
+# primary boot entry that's already working on this machine.
+OVERLAY_NAME="tegra234-p3767-camera-p3768-arducam-${VS_DRIVER_CAM}-combined"
+OVERLAY_SRC="${SCRIPT_DIR}/overlays/${OVERLAY_NAME}.dts"
+BOOT_LABEL="Arducam${VS_DRIVER_CAM^^}"     # ArducamIMX219 / ArducamIMX477
 
 if [ -f "$OVERLAY_SRC" ]; then
     echo "Compiling camera overlay..."
-    OVERLAY_TMP="/tmp/tegra234-p3767-camera-p3768-arducam-imx219-combined.dtbo"
+    OVERLAY_TMP="/tmp/${OVERLAY_NAME}.dtbo"
     dtc -I dts -O dtb -o "$OVERLAY_TMP" "$OVERLAY_SRC" 2>/dev/null
 
     if [ -f "$OVERLAY_TMP" ]; then
         # Determine overlay destination - prefer Arducam dir, fall back to /boot
         if [ -d "/boot/arducam/dts" ]; then
-            OVERLAY_DST="/boot/arducam/dts/tegra234-p3767-camera-p3768-arducam-imx219-combined.dtbo"
+            OVERLAY_DST="/boot/arducam/dts/${OVERLAY_NAME}.dtbo"
         else
             sudo mkdir -p /boot/overlays
-            OVERLAY_DST="/boot/overlays/tegra234-p3767-camera-p3768-arducam-imx219-combined.dtbo"
+            OVERLAY_DST="/boot/overlays/${OVERLAY_NAME}.dtbo"
         fi
 
         sudo cp "$OVERLAY_TMP" "$OVERLAY_DST"
@@ -249,8 +321,8 @@ if [ -f "$OVERLAY_SRC" ]; then
         sudo cp /boot/extlinux/extlinux.conf "$BACKUP"
         echo "  Backup: $BACKUP"
 
-        # Add ArducamIMX219 entry if it doesn't exist
-        if ! grep -q "ArducamIMX219" /boot/extlinux/extlinux.conf; then
+        # Add the boot entry if it doesn't exist
+        if ! grep -q "^LABEL ${BOOT_LABEL}\$" /boot/extlinux/extlinux.conf; then
             echo "Adding boot entry for combined camera overlay..."
 
             # Inherit the APPEND line from the "primary" entry verbatim. This
@@ -269,11 +341,21 @@ if [ -f "$OVERLAY_SRC" ]; then
                     exit
                 }' /boot/extlinux/extlinux.conf)
 
-            # FDT is intentionally NOT set: we rely on the bootloader's
-            # EEPROM-based DTB auto-detection so the entry works on NX 16GB,
-            # NX 8GB, Nano 8GB Super, etc. without any per-module fork.
-            # (Hardcoding p3767-0005-nv-super.dtb on NX hardware silently
-            # mis-identifies the SoC as Orin Nano and caps GPU clocks.)
+            # FDT: the UEFI L4TLauncher only applies OVERLAYS on top of an
+            # explicit FDT; without one it boots the DTB from the bootloader
+            # and silently skips the overlay (seen on L4T R36.5 and R39.2).
+            # Use the DTB that flashing installed under /boot/dtb/ for this
+            # exact module: it's always the right one for this board, so this
+            # doesn't hardcode a Nano DTB onto an NX (which would mis-identify
+            # the SoC and cap GPU clocks).
+            FDT_LINE=""
+            BOARD_DTBS=(/boot/dtb/kernel_*.dtb)
+            if [ ${#BOARD_DTBS[@]} -eq 1 ] && [ -f "${BOARD_DTBS[0]}" ]; then
+                FDT_LINE="FDT ${BOARD_DTBS[0]}"
+            else
+                echo "  Note: expected one /boot/dtb/kernel_*.dtb, found ${#BOARD_DTBS[@]}; leaving FDT unset."
+            fi
+
             if [ -f "/boot/arducam/Image" ]; then
                 KERNEL_PATH="/boot/arducam/Image"
             else
@@ -291,22 +373,23 @@ if [ -f "$OVERLAY_SRC" ]; then
 
             sudo tee -a /boot/extlinux/extlinux.conf > /dev/null << BOOTENTRY
 
-LABEL ArducamIMX219
-	MENU LABEL Custom Header Config: <AR0234 + IMX219 Combined>
+LABEL ${BOOT_LABEL}
+	MENU LABEL Custom Header Config: <AR0234 + ${VS_DRIVER_CAM^^} Combined>
 	LINUX ${KERNEL_PATH}
+	${FDT_LINE}
 	INITRD /boot/initrd
 	APPEND ${PRIMARY_APPEND}
 	OVERLAYS ${OVERLAY_DST}
 BOOTENTRY
-            echo "✓ Boot entry added (APPEND inherited from primary, FDT auto-detected)"
+            echo "✓ Boot entry ${BOOT_LABEL} added (APPEND inherited from primary)"
         else
-            echo "✓ Boot entry already exists"
+            echo "✓ Boot entry ${BOOT_LABEL} already exists"
         fi
 
-        # Set ArducamIMX219 as default boot entry
+        # Set the combined entry as default boot entry
         if grep -q "^DEFAULT " /boot/extlinux/extlinux.conf; then
-            sudo sed -i 's/^DEFAULT .*/DEFAULT ArducamIMX219/' /boot/extlinux/extlinux.conf
-            echo "✓ Default boot entry set to ArducamIMX219"
+            sudo sed -i "s/^DEFAULT .*/DEFAULT ${BOOT_LABEL}/" /boot/extlinux/extlinux.conf
+            echo "✓ Default boot entry set to ${BOOT_LABEL}"
         fi
 
         rm -f "$OVERLAY_TMP"
@@ -316,6 +399,12 @@ BOOTENTRY
 else
     echo "Warning: Camera overlay source not found at $OVERLAY_SRC"
 fi
+
+echo "Installing persistent camera names (/dev/video-mono, /dev/video-stereo)..."
+sudo install -m 0644 "${SCRIPT_DIR}/scripts/99-camera-persistent.rules" \
+    /etc/udev/rules.d/99-camera-persistent.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=video4linux || true
+echo "✓ udev rules installed"
 
 echo -e "\n15. Configuring kernel UDP buffers for Fast-DDS..."
 # A single 1200×1200×3 stereo image is 4.32 MB. With Fast-DDS LARGE_DATA mode
@@ -376,7 +465,17 @@ IMX219_UNIT_SRC="${SCRIPT_DIR}/scripts/visionsense-imx219.service"
 IMX219_UNIT_DST=/etc/systemd/system/visionsense-imx219.service
 IMX219_WARMUP_SRC="${SCRIPT_DIR}/scripts/imx219-csi-warmup.sh"
 if [ -f "$IMX219_UNIT_SRC" ] && [ -f "$IMX219_WARMUP_SRC" ]; then
-    sudo install -m 0644 "$IMX219_UNIT_SRC" "$IMX219_UNIT_DST"
+    # The unit in the repo is written for user jetson, /home/jetson/VisionSense
+    # and Humble; fill in this machine's user, checkout and ROS distro.
+    VS_USER="$(id -un)"
+    VS_GROUP="$(id -gn)"
+    sed -e "s#/home/jetson/VisionSense#${SCRIPT_DIR}#g" \
+        -e "s#^User=jetson#User=${VS_USER}#" \
+        -e "s#^Group=jetson#Group=${VS_GROUP}#" \
+        -e "s#/opt/ros/humble/#/opt/ros/${ROS_DISTRO}/#g" \
+        "$IMX219_UNIT_SRC" > /tmp/visionsense-imx219.service
+    sudo install -m 0644 /tmp/visionsense-imx219.service "$IMX219_UNIT_DST"
+    rm -f /tmp/visionsense-imx219.service
     sudo chmod +x "$IMX219_WARMUP_SRC"
     sudo systemctl daemon-reload
     sudo systemctl enable visionsense-imx219.service || true
@@ -385,7 +484,9 @@ if [ -f "$IMX219_UNIT_SRC" ] && [ -f "$IMX219_WARMUP_SRC" ]; then
     SUDOERS_SRC="${SCRIPT_DIR}/scripts/sudoers.visionsense-imx219"
     SUDOERS_DST=/etc/sudoers.d/visionsense-imx219
     if [ -f "$SUDOERS_SRC" ]; then
-        sudo install -m 0440 -o root -g root "$SUDOERS_SRC" "$SUDOERS_DST"
+        sed "s#^jetson #${VS_USER} #" "$SUDOERS_SRC" > /tmp/sudoers.visionsense-imx219
+        sudo install -m 0440 -o root -g root /tmp/sudoers.visionsense-imx219 "$SUDOERS_DST"
+        rm -f /tmp/sudoers.visionsense-imx219
         if sudo visudo -c -f "$SUDOERS_DST" >/dev/null 2>&1; then
             echo "✓ /etc/sudoers.d/visionsense-imx219 installed (passwordless re-kick)"
         else
@@ -418,14 +519,10 @@ echo ""
 echo "Next steps:"
 echo "1. REBOOT to load the camera device tree overlay"
 echo "2. Close and reopen your terminal (or run: source ~/.bashrc)"
-echo "3. Navigate to VisionSense directory: cd ~/VisionSense"
-echo "4. (Optional) If LightStereo .engine is missing or this Jetson's TRT/GPU"
-echo "   version changed, re-export the engine:"
-echo "     # see archive/scripts/regenerate_engines.sh for the legacy FFS recipe,"
-echo "     # or rebuild LightStereo with OpenStereo's deploy/trt_profile.sh:"
-echo "     #   cd /home/jetson/OpenStereo && \\"
-echo "     #     PATH=/usr/src/tensorrt/bin:\$PATH bash deploy/trt_profile.sh \\"
-echo "     #       --onnx <lightstereo_onnx> --saveEngine <out>.engine --fp16"
+echo "3. Navigate to VisionSense directory: cd $SCRIPT_DIR"
+echo "4. Rebuild the TensorRT engines for this Jetson's TensorRT version (needed"
+echo "   after every flash / JetPack change; engines are not portable):"
+echo "     bash scripts/regenerate_engines.sh"
 echo "5. Build with: colcon build --packages-select visionconnect"
 echo "6. Run with: bash launch_visionsense.sh   (or double-click the desktop icon)"
 echo "   The launch script exports FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA, which is"

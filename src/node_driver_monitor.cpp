@@ -6,6 +6,7 @@
  */
 
 #include "ros_compat.h"
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -633,13 +634,21 @@ int main(int argc, char** argv) {
     ROS_GET_PARAMETER("confidence", conf_thresh);
     ROS_GET_PARAMETER("enable_timing", enable_timing);
 
-    // Defaults
+    // Defaults. Relative engine paths resolve against the installed graphs
+    // directory (share/visionconnect/graphs), like detect/lanedet/classify.
     if (face_engine.empty())
-        face_engine = "/home/jetson/gaze-estimation/weights/yolov11n_face_fp16.engine";
+        face_engine = "face-detection/yolov11n-facefp16.engine";
     if (gaze_engine.empty())
-        gaze_engine = "/home/jetson/gaze-estimation/weights/resnet18_gaze_fp16.engine";
+        gaze_engine = "gaze-estimation/resnet18_gaze_fp16.engine";
     if (camera_topic.empty())
         camera_topic = "/camera/raw";
+
+    const std::string graphs_dir =
+        ament_index_cpp::get_package_share_directory("visionconnect") + "/graphs/";
+    if (face_engine[0] != '/')
+        face_engine = graphs_dir + face_engine;
+    if (gaze_engine[0] != '/')
+        gaze_engine = graphs_dir + gaze_engine;
 
     // Load models
     ROS_INFO("Loading face detector: %s", face_engine.c_str());

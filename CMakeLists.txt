@@ -29,12 +29,13 @@ find_package(jetson-utils REQUIRED)
 find_package(jetson-inference REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rcl_yaml_param_parser REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(vision_msgs REQUIRED)
 find_package(rmw_implementation REQUIRED)
-find_package(vpi 3 REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(rcl_interfaces REQUIRED)
@@ -56,8 +57,19 @@ pkg_check_modules(GST REQUIRED
     gobject-2.0)
 
 link_directories(/usr/lib/aarch64-linux-gnu/tegra)
-link_directories(/opt/nvidia/vpi2/lib64)
 link_directories(/usr/local/cuda/lib64)
+
+# FindCUDA ignores the CUDA_ARCHITECTURES target property, so pass the Orin
+# arch to nvcc directly. Without it nvcc falls back to its own default arch
+# (sm_75 on CUDA 13) and the kernels only run through PTX JIT.
+list(APPEND CUDA_NVCC_FLAGS -gencode arch=compute_87,code=sm_87)
+
+# ROS distro install prefix (humble on JetPack 6.2, jazzy on JetPack 7.2).
+if(DEFINED ENV{ROS_DISTRO})
+  set(ROS_PREFIX /opt/ros/$ENV{ROS_DISTRO})
+else()
+  set(ROS_PREFIX /opt/ros/jazzy)
+endif()
 
 # CUDA library for stereo rotation kernel (camera_stereo crop + split + flip)
 cuda_add_library(stereo_rotate_cuda STATIC src/cuda/stereo_rotate.cu)
@@ -78,6 +90,10 @@ file(GLOB_RECURSE common_src RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} src/common/*.c
 include_directories(src/common/include)
 add_library(common STATIC ${common_src})
 target_link_libraries(common ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} jetson-inference cudart preprocess_cuda)
+# ros_compat.h pulls in rclcpp and the message headers. On Jazzy the global
+# ${rclcpp_INCLUDE_DIRS} no longer carries rcl's transitive include paths
+# (type_description_interfaces, ...), so declare the deps on the target.
+ament_target_dependencies(common rclcpp rcl_yaml_param_parser sensor_msgs vision_msgs)
 
 # TensorRT related files
 set(TENSORRT_LIBS jetson-inference nvinfer cudart)
@@ -116,9 +132,9 @@ add_executable(stereo_depth_ffs src/node_stereo_depth_ffs.cpp ${common_src})
 include_directories(src/include ${catkin_INCLUDE_DIRS} ${CUDA_INCLUDE_DIRS})
 include_directories(${OpenCV_INCLUDE_DIRS} ${rclcpp_INCLUDE_DIRS})
 include_directories(${EIGEN3_INCLUDE_DIRS})
-include_directories(/opt/ros/humble/include/rmw)
-include_directories(/opt/ros/humble/include/rosidl_runtime_c)
-include_directories(/opt/ros/humble/include/rosidl_typesupport_interface)
+include_directories(${ROS_PREFIX}/include/rmw)
+include_directories(${ROS_PREFIX}/include/rosidl_runtime_c)
+include_directories(${ROS_PREFIX}/include/rosidl_typesupport_interface)
 include_directories(${rcl_interfaces_INCLUDE_DIRS})
 include_directories(${sensor_msgs_INCLUDE_DIRS})
 include_directories(${vision_msgs_INCLUDE_DIRS})

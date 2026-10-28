@@ -13,7 +13,7 @@ stereo:
 
 camera:
     ros__parameters:
-        resource:           "csi://0"   # IMX219 CSI mono cam for driver monitor
+        resource:           "csi://0"   # CSI mono cam for driver monitor (IMX219 or IMX477 on CAM0)
         width:              1280
         height:             720
 
@@ -137,7 +137,8 @@ adas:
 
 driver_monitor:
     ros__parameters:
-        face_engine:  "/home/jetson/VisionSense/src/graphs/face-detection/yolov11n-facefp16.engine"
-        gaze_engine:  "/home/jetson/VisionSense/src/graphs/gaze-estimation/resnet18_gaze_fp16.engine"
+        # Relative to share/visionconnect/graphs; absolute paths also work.
+        face_engine:  "face-detection/yolov11n-facefp16.engine"
+        gaze_engine:  "gaze-estimation/resnet18_gaze_fp16.engine"
         camera_topic: "/camera/raw"
         confidence:   0.5

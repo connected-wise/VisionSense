@@ -8,8 +8,13 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
+import os
 import cv2
 import numpy as np
+
+# Saved frames go to ./testing (run from the repo root, as launch_visionsense.sh
+# does) or to $VS_TESTING_DIR. The script itself may run from install/lib/.
+TESTING_DIR = os.environ.get('VS_TESTING_DIR', os.path.join(os.getcwd(), 'testing'))
 
 
 class DisparityDisplay(Node):
@@ -62,8 +67,8 @@ class DisparityDisplay(Node):
 
         # Also save first frame for comparison
         if self.frame_count == 1:
-            cv2.imwrite('/home/jetson/VisionSense/testing/disparity_ros_output.png', colored)
-            cv2.imwrite('/home/jetson/VisionSense/testing/disparity_ros_gray.png', img)
+            cv2.imwrite(os.path.join(TESTING_DIR, 'disparity_ros_output.png'), colored)
+            cv2.imwrite(os.path.join(TESTING_DIR, 'disparity_ros_gray.png'), img)
             self.get_logger().info('Saved first frame to testing/disparity_ros_output.png')
 
         key = cv2.waitKey(1)
