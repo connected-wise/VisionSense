@@ -1,0 +1,10 @@
+# Persistent names for the VisionSense cameras, matched on the V4L2 device
+# name (driver + I2C bus-address), so they survive /dev/videoN reordering.
+# Installed to /etc/udev/rules.d/ by install_all_deps.sh.
+
+# Driver-monitor camera on CAM0 (IMX219 or IMX477, whichever overlay is booted)
+SUBSYSTEM=="video4linux", ATTR{name}=="vi-output, imx219 *", SYMLINK+="video-mono", GROUP="video", MODE="0666"
+SUBSYSTEM=="video4linux", ATTR{name}=="vi-output, imx477 *", SYMLINK+="video-mono", GROUP="video", MODE="0666"
+
+# Arducam AR0234 stereo camera on CAM1
+SUBSYSTEM=="video4linux", ATTR{name}=="vi-output, arducam-csi2 *", SYMLINK+="video-stereo", GROUP="video", MODE="0666"

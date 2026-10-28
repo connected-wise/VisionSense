@@ -1,5 +1,7 @@
 [Unit]
 # Persistent owner of the IMX219 driver-monitor camera (Argus producer).
+# Also used unchanged for an IMX477 on CAM0 (imx477 combined overlay): the
+# unit opens Argus sensor 0 (csi://0), whichever sensor that is.
 #
 # Why this exists:
 #   The Jetson Argus stack (libargus + nvargus-daemon + tegra-camrtc RTCPU
@@ -13,6 +15,8 @@
 # as a regular ROS topic. Closing VisionSense never touches Argus.
 #
 # Install:  sudo cp scripts/visionsense-imx219.service /etc/systemd/system/
+#           (or let install_all_deps.sh install it with this machine's
+#           user, checkout path and ROS distro filled in)
 #           sudo systemctl daemon-reload
 #           sudo systemctl enable --now visionsense-imx219.service
 #
@@ -27,6 +31,9 @@ After=nvargus-daemon.service network-online.target
 Requires=nvargus-daemon.service
 
 [Service]
+# install_all_deps.sh rewrites the user (jetson), the checkout path
+# (/home/jetson/VisionSense) and the ROS distro (humble) below to match the
+# machine it installs on, e.g. vision2x + jazzy on JetPack 7.2.
 Type=simple
 User=jetson
 Group=jetson

@@ -4,7 +4,11 @@
 
 VisionSense uses two cameras with guaranteed persistent device assignments:
 
-1. **Mono Camera (Driver Monitoring)**: IMX219 camera at I2C address 10-0010
+1. **Mono Camera (Driver Monitoring)**: IMX219 camera at I2C address 10-0010,
+   or IMX477 at 10-001a (`VS_DRIVER_CAM=imx477`, overlay
+   `overlays/tegra234-p3767-camera-p3768-arducam-imx477-combined.dts`; with
+   the IMX477 the V4L2 numbering is video0 = IMX477, video1 = stereo on both
+   JetPack 6.2 and 7.2 in practice, but use the symlinks below)
    - Device: `/dev/video0` (V4L2) / `csi://0` (Argus/jetson-utils)
    - Symlink: `/dev/video-mono` → `/dev/video0`
    - Resolution: 1920x1080 (also supports 1640x1232, 3280x2464)
@@ -20,14 +24,13 @@ VisionSense uses two cameras with guaranteed persistent device assignments:
 
 To ensure camera assignments remain consistent across reboots, udev rules have been configured:
 
-**Rule File**: `/etc/udev/rules.d/99-camera-persistent.rules`
+**Rule File**: `/etc/udev/rules.d/99-camera-persistent.rules`, installed by
+`install_all_deps.sh` from `scripts/99-camera-persistent.rules`:
 
 ```
-# IMX219 mono camera (driver monitoring)
-SUBSYSTEM=="video4linux", ATTR{name}=="vi-output, imx219 10-0010", SYMLINK+="video-mono", GROUP="video", MODE="0666"
-
-# Arducam stereo camera (depth perception)
-SUBSYSTEM=="video4linux", ATTR{name}=="vi-output, arducam-csi2 9-000c", SYMLINK+="video-stereo", GROUP="video", MODE="0666"
+SUBSYSTEM=="video4linux", ATTR{name}=="vi-output, imx219 *", SYMLINK+="video-mono", GROUP="video", MODE="0666"
+SUBSYSTEM=="video4linux", ATTR{name}=="vi-output, imx477 *", SYMLINK+="video-mono", GROUP="video", MODE="0666"
+SUBSYSTEM=="video4linux", ATTR{name}=="vi-output, arducam-csi2 *", SYMLINK+="video-stereo", GROUP="video", MODE="0666"
 ```
 
 ### How It Works

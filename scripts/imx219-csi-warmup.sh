@@ -19,7 +19,15 @@
 
 set +e
 
+# The stereo board's /dev/videoN depends on probe order (video1 next to an
+# IMX219, video1 or video0 next to an IMX477), so find it by driver name.
 DEV=/dev/video1
+for v in /sys/class/video4linux/video*; do
+    if grep -q "arducam-csi2" "$v/name" 2>/dev/null; then
+        DEV=/dev/$(basename "$v")
+        break
+    fi
+done
 W=3840
 H=1200
 FMT=UYVY
