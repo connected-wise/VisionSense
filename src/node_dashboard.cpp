@@ -8,8 +8,6 @@
 
 #include "ros_compat.h"
 #include "common.h"
-#include "trtutil.h"
-#include "image_converter.h"
 #include "dashboard_server.h"
 #include "webrtc_server.h"
 
@@ -392,7 +390,7 @@ int main(int argc, char **argv) {
         ROS_INFO("WebRTC manager failed to start (missing GStreamer elements?)");
         return 1;
     }
-    ROS_INFO("WebRTC (NVENC H.264 via webrtcbin) ready — browser will use "
+    ROS_INFO("WebRTC (H.264 via webrtcbin) ready — browser will use "
              "video streams for fused/depth/driver/bev/camera/lanes.");
 
     // Route inbound text frames into (1) the WebRTC signaling handler and

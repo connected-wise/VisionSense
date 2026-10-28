@@ -108,11 +108,16 @@ add_executable(detect src/node_detect.cpp ${common_src})
 add_executable(classify src/node_classify.cpp ${common_src})
 add_executable(lanedet src/node_lanedet.cpp ${common_src})
 add_executable(preview src/node_preview.cpp ${common_src})
+# The dashboard only needs the OpenCV/ROS helpers from common, not the
+# jetson-utils ones: libjetson-utils links libsoup-2.4, and on Ubuntu 24.04
+# webrtcbin (libnice -> gupnp-igd) loads libsoup-3.0, which aborts the process
+# ("libsoup2 symbols detected") as soon as a browser opens a WebRTC stream.
 add_executable(dashboard
     src/node_dashboard.cpp
     src/dashboard_server.cpp
     src/webrtc_server.cpp
-    ${common_src})
+    src/common/common.cpp
+    src/common/ros_compat.cpp)
 target_include_directories(dashboard PRIVATE
     ${LIBWEBSOCKETS_INCLUDE_DIRS}
     ${GST_INCLUDE_DIRS})
@@ -187,9 +192,6 @@ target_link_libraries(preview
 target_link_libraries(dashboard
     ${catkin_LIBRARIES}
     ${OpenCV_LIBRARIES}
-    ${TENSORRT_LIBS}
-    jetson-inference
-    common
     ${LIBWEBSOCKETS_LIBRARIES}
     ${GST_LIBRARIES}
 )

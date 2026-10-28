@@ -5,6 +5,9 @@
 //   appsrc(BGR) → videoconvert → nvvidconv (NVMM,NV12) → nvv4l2h264enc (NVENC)
 //                → h264parse → rtph264pay → webrtcbin
 //
+// On boards without NVENC (Orin Nano; JetPack 7.2 ships no nvv4l2h264enc)
+// the encoder is x264enc instead: videoconvert (I420) → x264enc → h264parse.
+//
 // Signaling (SDP + ICE) is exchanged over the existing libwebsockets text
 // channel as JSON: webrtc-request / webrtc-offer / webrtc-answer /
 // webrtc-ice / webrtc-stop. WebRTCManager is signaling-transport-agnostic —
@@ -130,6 +133,7 @@ private:
 
     SignalingSender sender_;
     std::atomic<bool> running_{false};
+    bool hw_encoder_ = true;  // nvv4l2h264enc available; else x264enc
     GMainLoop *loop_ = nullptr;
     GMainContext *loop_ctx_ = nullptr;
     std::thread thread_;

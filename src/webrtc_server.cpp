@@ -218,19 +218,32 @@ bool WebRTCManager::start() {
     if (!gst_is_initialized()) {
         gst_init(nullptr, nullptr);
     }
-    // Verify the elements we need exist.
-    for (const char *factory : {"appsrc", "videoconvert", "nvvidconv",
-                                "nvv4l2h264enc", "h264parse", "rtph264pay",
-                                "webrtcbin"}) {
+    auto have = [](const char *factory) {
         GstElementFactory *f = gst_element_factory_find(factory);
-        if (!f) {
+        if (f) gst_object_unref(f);
+        return f != nullptr;
+    };
+    // Verify the elements we need exist.
+    for (const char *factory : {"appsrc", "videoconvert", "h264parse",
+                                "rtph264pay", "webrtcbin"}) {
+        if (!have(factory)) {
             g_printerr("[webrtc] required GStreamer element not found: %s\n",
                        factory);
             running_ = false;
             return false;
         }
-        gst_object_unref(f);
     }
+    // NVENC when the board has it. The Orin Nano has no hardware encoder and
+    // JetPack 7.2 no longer ships nvv4l2h264enc at all, so fall back to x264.
+    hw_encoder_ = have("nvvidconv") && have("nvv4l2h264enc");
+    if (!hw_encoder_ && !have("x264enc")) {
+        g_printerr("[webrtc] no H.264 encoder: need nvv4l2h264enc or x264enc "
+                   "(gstreamer1.0-plugins-ugly)\n");
+        running_ = false;
+        return false;
+    }
+    g_printerr("[webrtc] H.264 encoder: %s\n",
+               hw_encoder_ ? "nvv4l2h264enc (NVENC)" : "x264enc (software)");
     loop_ctx_ = g_main_context_new();
     loop_ = g_main_loop_new(loop_ctx_, FALSE);
     thread_ = std::thread([this] { thread_main(); });
@@ -416,16 +429,31 @@ void WebRTCManager::mainloop_create_pipeline(ClientHandle client,
     // step in regular memory; nvvidconv then moves to NVMM/NV12 for NVENC.
     // iframeinterval is taken from kCaps so low-rate streams (like FUSED)
     // get frequent keyframes and don't stall waiting for IDR recovery.
+    // Without NVENC, x264enc encodes the I420 directly (baseline, no
+    // B-frames, so browsers decode it the same as the NVENC stream).
+    const int iframeinterval = cap.iframeinterval > 0 ? cap.iframeinterval : 15;
+    char encbuf[384];
+    if (hw_encoder_) {
+        std::snprintf(encbuf, sizeof(encbuf),
+            "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
+            "nvv4l2h264enc maxperf-enable=true insert-sps-pps=true "
+                "iframeinterval=%d control-rate=1 bitrate=%d "
+                "preset-level=1 profile=0 ! ",
+            iframeinterval, kDefaultBitrateBps);
+    } else {
+        std::snprintf(encbuf, sizeof(encbuf),
+            "x264enc tune=zerolatency speed-preset=ultrafast threads=2 "
+                "key-int-max=%d bitrate=%d ! "
+            "video/x-h264,profile=constrained-baseline ! ",
+            iframeinterval, kDefaultBitrateBps / 1000);  // x264enc: kbit/s
+    }
     char descbuf[1024];
     std::snprintf(descbuf, sizeof(descbuf),
         "appsrc name=src is-live=true do-timestamp=true format=time "
             "max-buffers=4 leaky-type=2 "
             "caps=video/x-raw,format=BGR,width=%d,height=%d,framerate=%d/1 ! "
         "videoconvert ! video/x-raw,format=I420 ! "
-        "nvvidconv ! video/x-raw(memory:NVMM),format=NV12 ! "
-        "nvv4l2h264enc maxperf-enable=true insert-sps-pps=true "
-            "iframeinterval=%d control-rate=1 bitrate=%d "
-            "preset-level=1 profile=0 ! "
+        "%s"
         "h264parse config-interval=-1 ! "
         "rtph264pay pt=96 config-interval=-1 ! "
         "application/x-rtp,media=video,encoding-name=H264,payload=96 ! "
@@ -434,9 +462,7 @@ void WebRTCManager::mainloop_create_pipeline(ClientHandle client,
         // the element exists. Default would be stun://stun.l.google.com:19302,
         // which hangs on DNS without internet.
         "webrtcbin name=webrtc bundle-policy=max-bundle latency=0",
-        cap.width, cap.height, cap.fps,
-        cap.iframeinterval > 0 ? cap.iframeinterval : 15,
-        kDefaultBitrateBps);
+        cap.width, cap.height, cap.fps, encbuf);
 
     GError *err = nullptr;
     GstElement *pipeline = gst_parse_launch(descbuf, &err);
