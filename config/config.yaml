@@ -6,7 +6,7 @@ ui:
 # Hardware variant. Each release branch (VisionSense_<board>_<layout>) sets
 # these for its rig; see README "Hardware variants".
 hardware:
-    layout: "2F1R"      # "2F1R": stereo forward + mono camera facing the driver
+    layout: "3F0R"      # "2F1R": stereo forward + mono camera facing the driver
                         # "3F0R": stereo + mono camera all forward; 2D
                         #         perception runs on the mono camera
                         #         (/camera/raw), no driver monitor
