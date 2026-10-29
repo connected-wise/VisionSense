@@ -40,6 +40,17 @@ def generate_launch_description():
 	if calib_name:
 		cs_params["calibration_file"] = os.path.join(config_dir, calib_name)
 
+	# V4L2 numbering can swap between boots, so config.yaml names the stereo
+	# camera by its udev symlink (/dev/video-stereo, 99-camera-persistent.rules).
+	# jetson-utils only parses /dev/video<N>, so hand it the real node.
+	stereo_dev = str(cs_params.get("resource", ""))
+	if stereo_dev.startswith("/dev/") and os.path.islink(stereo_dev):
+		cs_params["resource"] = os.path.realpath(stereo_dev)
+		print(f"[visionsense.launch] stereo camera {stereo_dev} -> {cs_params['resource']}")
+	elif stereo_dev.startswith("/dev/") and not os.path.exists(stereo_dev):
+		print(f"[visionsense.launch] WARNING: stereo camera {stereo_dev} not found — "
+		      "check the udev rule and the camera cable")
+
 	# Resolve which eye of the stereo pair single-image consumers (detect,
 	# lanedet, gui, dashboard) read from. Defaults to "left" if `stereo.main_eye`
 	# is absent or malformed. stereo_depth is unaffected — it still subscribes
@@ -195,12 +206,16 @@ def generate_launch_description():
 	# Stereo Camera (for depth) — calibration_file resolved above into cs_params
 	# so its CameraInfo carries calibrated K/D/R/P (consumed by downstream
 	# rectification + the LightStereo node).
+	# respawn: if the stream dies (the node exits once V4L2 stops streaming),
+	# restart it; reopening re-sends stream-on to the Arducam adapter.
 	camera_stereo_node = Node(
 		package="visionconnect",
 		name="camera_stereo",
 		executable="camera_stereo",
 		output="screen",
 		parameters=[cs_params],
+		respawn=True,
+		respawn_delay=3.0,
 	)
 	ld.add_action(camera_stereo_node)
 
