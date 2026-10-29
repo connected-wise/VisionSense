@@ -111,8 +111,8 @@ Each supported rig has its own release branch, named
 |--------|-------|--------|--------|
 | `VisionSense_Nano_2F1R` | Orin Nano | 2F1R | Tested (Orin Nano Super, JetPack 7.2.1) |
 | `VisionSense_Nano_3F0R` | Orin Nano | 3F0R | Tested on the bench; lane, ADAS and BEV tuning for a forward IMX477 still to do |
-| `VisionSense_NX_2F1R` | Orin NX | 2F1R | Placeholder: same code as the Nano branch, not yet adapted or tested on an Orin NX |
-| `VisionSense_NX_3F0R` | Orin NX | 3F0R | Placeholder: same code as the Nano branch, not yet adapted or tested on an Orin NX |
+| `VisionSense_NX_2F1R` | Orin NX | 2F1R | Tested (Orin NX 8GB Super, JetPack 7.2.1) |
+| `VisionSense_NX_3F0R` | Orin NX | 3F0R | Not yet tested on an Orin NX; same code as `VisionSense_NX_2F1R` with the 3F0R layout |
 
 The layout says how many cameras face forward (F) and to the rear/cabin (R):
 
@@ -416,9 +416,9 @@ Web-based monitoring interface accessible via browser.
 
 Video goes to the browser over WebRTC as H.264. The dashboard uses the NVENC
 hardware encoder (`nvv4l2h264enc`) when the board has one and falls back to
-software `x264enc` otherwise. The Orin Nano has no NVENC, and JetPack 7.2 does
-not ship `nvv4l2h264enc`. Software encoding costs CPU while a browser is
-watching (about 75% across all six cores on an Orin Nano).
+software `x264enc` otherwise. The Orin NX uses NVENC. The Orin Nano has no
+NVENC, so `nvv4l2h264enc` is not available there, and software encoding costs
+CPU while a browser is watching (about 75% across all six cores).
 
 ---
 

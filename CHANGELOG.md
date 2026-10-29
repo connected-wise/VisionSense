@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Tested
+
+- `VisionSense_NX_2F1R` on a Jetson Orin NX 8GB Super (p3767-0001) with
+  JetPack 7.2.1 (L4T R39.2.1) in MAXN_SUPER, an IMX477 on CAM0 and an
+  Arducam B0577 AR0234 sync stereo on CAM1 over extension cables. The camera
+  overlay, the dashboard's NVENC encoder (`nvv4l2h264enc`) and all TensorRT
+  engines (rebuilt on the NX) work without code changes. The stereo pair
+  streamed 3840x1200 at 30 fps for 5 minutes with no errors after the two
+  frames the VI discards at stream start.
+- An Orin Nano SSD moved to an Orin NX needs its boot entry pointed at the
+  NX device tree (`kernel_tegra234-p3768-0000+p3767-0001-nv-super.dtb`) and
+  `/etc/nvpmodel.conf` linked to `nvpmodel_p3767_0001_super.conf`; reflashing
+  QSPI alone leaves both set for the Nano.
+
+### Fixed
+
+- The stereo camera is opened by its udev name `/dev/video-stereo`, which the
+  launch file resolves to the real `/dev/videoN`, so a boot that numbers the
+  video devices differently no longer opens the wrong camera.
+- `camera_stereo` restarts 3 s after it exits (for example when the stream
+  stops), which re-sends stream-on to the Arducam adapter.
+
 ## v2.0.0 (2026-10-27)
 
 VisionSense on JetPack 7.2: Ubuntu 24.04, ROS 2 Jazzy, CUDA 13.2,
