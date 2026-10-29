@@ -30,7 +30,7 @@ camera:
 
 camera_stereo:
     ros__parameters:
-        resource:           "/dev/video1"   # Arducam stereo
+        resource:           "/dev/video-stereo"   # Arducam stereo (udev symlink; launch resolves it)
         width:              3840        # full stereo (1920 L + 1920 R)
         height:             1200
         framerate:          30
