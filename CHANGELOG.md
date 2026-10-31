@@ -18,6 +18,11 @@
 
 ### Fixed
 
+- Stereo frames green below the top, with every frame failing its payload
+  CRC: the combined overlays set the AR0234 `pix_clk_hz` to 154 MHz, from
+  which the driver clocked NVCSI at 39 MHz, too slow for 3840x1200 UYVY, so
+  its RX FIFOs overflowed. It is now 320 MHz (Arducam's value), giving an
+  80 MHz NVCSI clock. Reinstall the overlay and reboot to apply.
 - The stereo camera is opened by its udev name `/dev/video-stereo`, which the
   launch file resolves to the real `/dev/videoN`, so a boot that numbers the
   video devices differently no longer opens the wrong camera.
