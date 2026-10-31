@@ -328,11 +328,13 @@
 								line_length = "4400";
 								inherent_gain = "1";
 								mclk_multiplier = "6.67";
-								/* NVCSI derives the D-PHY lane rate, and from it the HS settle
-								 * (sync) window, from pix_clk_hz. 154 MHz (385 Mbps/lane) is the
-								 * value this board streamed with on L4T R36 in VisionSense; keep
-								 * it matched to the board so the receiver locks onto its bursts. */
-								pix_clk_hz = "154000000";
+								/* The camera driver clocks NVCSI at about pix_clk_hz / 4, and
+								 * NVCSI also derives the lane rate (HS settle) from it. The
+								 * adapter sends 3840x1200 UYVY at roughly 800 Mbps/lane, Arducam's
+								 * own value. 154 MHz gave a 39 MHz NVCSI clock, just under what the
+								 * stream needs (about 50 MHz): the RX FIFOs overflowed, every frame
+								 * failed its payload CRC, and frames were green below the top. */
+								pix_clk_hz = "320000000";
 								gain_factor = "16";
 								framerate_factor = "1000000";
 								exposure_factor = "1000000";

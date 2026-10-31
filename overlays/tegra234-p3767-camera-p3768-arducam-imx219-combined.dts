@@ -438,7 +438,9 @@
 								line_length = "4400";
 								inherent_gain = "1";
 								mclk_multiplier = "6.67";
-								pix_clk_hz = "154000000";
+								/* NVCSI is clocked at about pix_clk_hz / 4; 154 MHz was too slow
+								 * for 3840x1200 UYVY (see the IMX477 combined overlay). */
+								pix_clk_hz = "320000000";
 								gain_factor = "16";
 								framerate_factor = "1000000";
 								exposure_factor = "1000000";
