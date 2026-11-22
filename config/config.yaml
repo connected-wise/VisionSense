@@ -32,7 +32,7 @@ camera:
         # Mount orientation. jetson-utils turns a CSI camera's image by 180
         # degrees unless told otherwise, so "" suits a camera mounted the usual
         # way and "rotate-180" one mounted upside down relative to that.
-        flip:               ""
+        flip:               "rotate-180"   # this rig's mono camera is mounted upside down
 
 camera_stereo:
     ros__parameters:
