@@ -1,0 +1,2 @@
+# SARA-R5 mux channels: readable by gpsd and dialout users
+KERNEL=="gsmtty[0-9]*", GROUP="dialout", MODE="0660"

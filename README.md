@@ -363,11 +363,26 @@ Advanced Driver Assistance System alerts based on lane and detection data.
 
 ### 9. IMU/GPS Node (`imu_gps`)
 
-Sensor fusion for IMU and GPS data (BNO055 + GPS module).
+IMU data over I2C (bus 7) and GPS through gpsd. Supported boards:
+
+- **BerryGPS-IMU v4**: LSM6DSL accel/gyro (0x6A), LIS3MDL magnetometer (0x1C),
+  GPS on `/dev/ttyTHS1`.
+- **OzzMaker SARA-R5 LTE-M GPS + 10DOF**: LSM6DSL (0x6A), MMC5983MA
+  magnetometer (0x30), BMP388 barometer (0x77, not read yet). GPS and the
+  LTE-M modem share `/dev/ttyTHS1` through a CMUX multiplexer: AT commands on
+  `/dev/gsmtty1`, PPP on `/dev/gsmtty2`, GNSS on `/dev/gsmtty4` for gpsd.
+  The PPP link is the NetworkManager connection **LTE** (`ppp0`, in the
+  network menu), used when Wi-Fi and Ethernet are down. Set up by
+  `scripts/sara-r5/install_sara_r5.sh` (service `sara-r5-mux`; NetworkManager
+  starts `sara-r5-ppp`).
+
+The node picks whichever magnetometer answers.
 
 **Topics Published:**
-- `/imu_gps/imu/data` (`sensor_msgs/Imu`) - IMU orientation and acceleration
+- `/imu_gps/imu/data` (`sensor_msgs/Imu`) - acceleration (±4 g) and angular rate
+- `/imu_gps/imu/mag` (`sensor_msgs/MagneticField`) - magnetic field (uncalibrated)
 - `/imu_gps/gps/fix` (`sensor_msgs/NavSatFix`) - GPS coordinates
+- `/imu_gps/gps/velocity` (`geometry_msgs/TwistStamped`) - GPS speed
 
 ---
 
@@ -443,6 +458,13 @@ bash install_all_deps.sh                      # IMX219 on CAM0 (default)
 VS_DRIVER_CAM=imx477 bash install_all_deps.sh # IMX477 on CAM0
 ```
 
+`VS_GPS_MODULE` picks the GPS/IMU board: `berrygps` (default) or `sara-r5`
+for the OzzMaker SARA-R5 LTE-M GPS + 10DOF, which also sets up the LTE-M
+data link (see [IMU/GPS Node](#9-imugps-node-imu_gps)). Set `VS_LTE_APN` to
+the SIM's APN (`hologram` for the Hologram SIM that comes with the board).
+LTE-M is a low-rate link (tens of KB/s): fine for telemetry, slow for web
+browsing.
+
 This script installs:
 - ROS2 desktop and vision packages for the detected distro
 - Build tools (cmake, colcon, etc.)
@@ -454,7 +476,7 @@ This script installs:
 - **udev rules** for `/dev/video-mono` and `/dev/video-stereo`
 - **`nvargus-daemon` override** (`enableCamInfiniteTimeout=1`) to avoid CSI buffer wedge on disconnect
 - **Kernel UDP buffers** (`/etc/sysctl.d/99-ros2-fastdds.conf`, 16 MB) — required for stereo @ 30 Hz
-- **`visionsense-imx219.service`** systemd unit + passwordless sudoers rule. This unit owns the IMX219 driver-monitor camera for the entire system uptime (workaround for an Argus reopen bug on this rig — every second `nvarguscamerasrc` session fails until reboot otherwise). VisionSense subscribes to `/camera/raw` as a normal ROS topic.
+- **`visionsense-imx219.service`** systemd unit + passwordless sudoers rule (IMX219 only — with an IMX477 the launch file starts the mono camera itself and no service is installed). This unit owns the IMX219 driver-monitor camera for the entire system uptime (workaround for an Argus reopen bug on this rig — every second `nvarguscamerasrc` session fails until reboot otherwise). VisionSense subscribes to `/camera/raw` as a normal ROS topic.
 
 > The CUDA preprocessing kernels in `src/cuda/preprocess.cu`, `src/cuda/stereo_rotate.cu`, and `src/cuda/stereo_rectify.cu` replace the OpenCV `cv::cuda::*` ops earlier branches relied on, so an OpenCV-with-CUDA source build is no longer needed.
 
@@ -535,7 +557,7 @@ The capture script reads `/dev/video1` directly (bypassing ROS) and saves byte-i
 
 ```bash
 # Stop VisionSense first — only one process can hold /dev/video1.
-sudo systemctl stop visionsense-imx219.service   # IMX219 mono still runs from here
+sudo systemctl stop visionsense-imx219.service   # IMX219 rigs only: the mono camera runs from here
 # Then either fully stop VisionSense or just kill camera_stereo before capture.
 
 cd scripts
@@ -606,6 +628,11 @@ for i in (0,40,80):
 
 ### Desktop Launcher
 Double-click the **VisionSense** icon on the desktop.
+It runs `launch_visionsense.sh` in a terminal and opens the dashboard; closing the terminal stops everything.
+`install_all_deps.sh` installs it. To (re)install it by hand:
+```bash
+bash scripts/install_desktop_launcher.sh
+```
 
 ### Command Line
 ```bash

@@ -1,0 +1,10 @@
+[Unit]
+Description=SARA-R5 LTE-M data connection (PPP on /dev/gsmtty2)
+After=sara-r5-mux.service
+BindsTo=sara-r5-mux.service
+
+# Started and stopped by NetworkManager through its "LTE" connection
+# (nm-device-handler-sara-r5), which also retries when the link drops.
+[Service]
+Type=simple
+ExecStart=/usr/sbin/pppd call sara-r5 nodetach

@@ -7,7 +7,7 @@ import os
 import subprocess
 import yaml
 
-from ament_index_python import get_package_share_directory
+from ament_index_python import get_package_prefix, get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import ExecuteProcess, IncludeLaunchDescription, TimerAction
@@ -85,35 +85,41 @@ def generate_launch_description():
 	ui_display = bool(ui.get("display", True))
 	ui_dashboard = bool(ui.get("dashboard", False))
 
-	# Mono IMX219 driver-monitor camera — NOT started here.
+	# Mono driver camera (/camera/raw, Argus csi://0).
 	#
-	# The Jetson Argus stack wedges its CSI/RTCPU state on Producer close;
-	# every second `nvarguscamerasrc` session fails with INVALID_SETTINGS
-	# until reboot (bare gst-launch reproduces it, so it's an NVIDIA bug, not
-	# ours). To avoid that, the IMX219 is owned by a persistent systemd unit
-	# — `scripts/visionsense-imx219.service`, installed once via
-	# `sudo systemctl enable --now visionsense-imx219` — which opens the
-	# camera at boot and never closes it. driver_monitor + anyone else just
-	# subscribes to /camera/raw as a normal ROS topic, oblivious to who's
-	# publishing it. Closing VisionSense no longer touches Argus.
+	# IMX477: started here and closed with VisionSense, like every other node.
 	#
-	# If the systemd unit isn't installed yet, /camera/raw simply won't be
-	# published and driver_monitor will idle — log a hint so it's obvious.
+	# IMX219: Argus does not survive a Producer close with that sensor — every
+	# second `nvarguscamerasrc` session fails with INVALID_SETTINGS until
+	# reboot (bare gst-launch reproduces it, so it's an NVIDIA bug, not ours).
+	# Those rigs keep the camera open for the whole uptime in
+	# `visionsense-imx219.service` (install_all_deps.sh installs it for
+	# VS_DRIVER_CAM=imx219 only). When that unit is active it already publishes
+	# /camera/raw, so no second Argus producer is started here.
 	try:
-		_active = subprocess.run(
+		_service_active = subprocess.run(
 			["systemctl", "is-active", "--quiet", "visionsense-imx219.service"],
 			timeout=2,
 		).returncode == 0
 	except Exception:
-		_active = False
-	if not _active:
-		print("[visionsense.launch] WARNING: visionsense-imx219.service is not active — "
-		      "/camera/raw will be silent. Install with: "
-		      "sudo cp scripts/visionsense-imx219.service /etc/systemd/system/ && "
-		      "sudo systemctl daemon-reload && "
-		      "sudo systemctl enable --now visionsense-imx219.service")
-
-
+		_service_active = False
+	if _service_active:
+		print("[visionsense.launch] mono camera: /camera/raw comes from "
+		      "visionsense-imx219.service")
+	else:
+		# No DISPLAY for this node: with one set, Argus opens its EGL display
+		# on the X server and the capture dies with "Failed to initialize
+		# EGLDisplay" when X refuses the connection (e.g. launched over SSH).
+		# Without it Argus uses its headless EGL display, which always works.
+		camera_node = Node(
+			package="visionconnect",
+			name="camera",
+			executable="camera",
+			output="screen",
+			parameters=[config["camera"]["ros__parameters"]],
+			prefix="env -u DISPLAY -u XAUTHORITY -u WAYLAND_DISPLAY",
+		)
+		ld.add_action(camera_node)
 
 	# Object Detection
 	detect_node = Node(
@@ -360,6 +366,8 @@ def generate_launch_description():
 	# Fix: poll the server, use a dedicated --user-data-dir so we always get a
 	# fresh kiosk instance, and force the autoplay policy.
 	if ui_dashboard:
+		fullscreen_helper = os.path.join(
+			get_package_prefix("visionconnect"), "lib", "visionconnect", "x11_fullscreen.py")
 		kiosk_cmd = (
 			"for bin in chromium-browser chromium google-chrome chrome; do "
 			"  if command -v \"$bin\" >/dev/null 2>&1; then BROWSER=\"$bin\"; break; fi; "
@@ -378,8 +386,18 @@ def generate_launch_description():
 			# Dedicated user-data-dir → fresh chromium instance, never reuses
 			# an already-running profile (which would ignore --kiosk and load
 			# stale state). Cleared every launch keeps things deterministic.
+			# A snap Chromium (Ubuntu 24.04) cannot write to hidden folders in
+			# $HOME: with the profile in ~/.cache it exits with code 21 and
+			# "Failed to create SingletonLock: Permission denied".
 			"DATA_DIR=\"$HOME/.cache/visionsense-kiosk\"; "
+			"if [ -d \"$HOME/snap/chromium/common\" ]; then "
+			"  DATA_DIR=\"$HOME/snap/chromium/common/visionsense-kiosk\"; "
+			"fi; "
 			"rm -rf \"$DATA_DIR\" 2>/dev/null; mkdir -p \"$DATA_DIR\"; "
+			# --kiosk alone leaves the snap Chromium of Ubuntu 24.04 in a normal
+			# window, so also ask the window manager for fullscreen once the
+			# dashboard window exists (matched by the page title).
+			f"( python3 '{fullscreen_helper}' 'VisionSense Dashboard' 30 ) & "
 			"exec \"$BROWSER\" "
 			"  --user-data-dir=\"$DATA_DIR\" "
 			"  --kiosk "
