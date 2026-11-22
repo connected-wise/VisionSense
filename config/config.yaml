@@ -6,15 +6,12 @@ ui:
 # Hardware variant. Each release branch (VisionSense_<board>_<layout>) sets
 # these for its rig; see README "Hardware variants".
 hardware:
-    layout: "2F1R"      # "2F1R": stereo forward + mono camera facing the driver
-                        #         (driver monitor)
-                        # "3F0R": stereo + mono camera all forward, for fleet
-                        #         data collection; 2D perception and road
-                        #         damage (pothole) segmentation run on the
-                        #         mono camera (/camera/raw), no driver monitor
-    # 3F0R only: mono camera intrinsics (same YAML format as
-    # camera_stereo.calibration_file) for BEV. Empty = BEV built-in defaults.
-    mono_calibration_file: ""
+    layout: "2F1R"      # What the mono CSI camera is for. The stereo pair
+                        # faces forward and feeds 2D perception either way.
+                        # "2F1R": it faces the driver (driver monitor)
+                        # "3F0R": it faces the road, for fleet data
+                        #         collection (road damage / pothole
+                        #         segmentation)
 
 # Single-eye topic routing for downstream consumers (detect/lanedet/gui/dashboard).
 # stereo_depth ignores this and always uses both eyes.

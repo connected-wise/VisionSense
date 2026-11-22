@@ -111,26 +111,23 @@ Each supported rig has its own release branch, named
 | Branch | Board | Layout | Status |
 |--------|-------|--------|--------|
 | `VisionSense_Nano_2F1R` | Orin Nano | 2F1R | Tested (Orin Nano Super, JetPack 7.2.1) |
-| `VisionSense_Nano_3F0R` | Orin Nano | 3F0R | Tested on the bench; lane, ADAS and BEV tuning for a forward IMX477 still to do |
+| `VisionSense_Nano_3F0R` | Orin Nano | 3F0R | Not yet tested with road damage; same code as `VisionSense_NX_3F0R` |
 | `VisionSense_NX_2F1R` | Orin NX | 2F1R | Tested (Orin NX 8GB Super, JetPack 7.2.1) |
-| `VisionSense_NX_3F0R` | Orin NX | 3F0R | Tested on the bench (Orin NX 8GB Super, JetPack 7.2.1), road damage on sample footage only; lane, ADAS and BEV tuning for a forward IMX477 still to do |
+| `VisionSense_NX_3F0R` | Orin NX | 3F0R | Tested on the bench (Orin NX 8GB Super, JetPack 7.2.1); road damage on sample footage only, not yet on a road |
 
 The layout says how many cameras face forward (F) and to the rear/cabin (R):
 
-- **2F1R**: the AR0234 stereo pair faces forward, and the mono CSI camera on
-  CAM0 faces the driver. 2D perception (detection, signs, lanes, ADAS, BEV,
-  fused view) runs on the stereo main eye, and the driver monitor runs on the
-  mono camera.
-- **3F0R**: the stereo pair and the mono camera all face forward, for fleet
-  data collection. 2D perception runs on the mono camera (`/camera/raw`) and
-  the stereo pair only produces depth. In place of the driver monitor, the
-  mono camera feeds the [road damage node](#8-road-damage-node-road_damage),
-  which segments potholes and logs them with their GPS position; the
-  dashboard shows it as the **Road** view. The mono camera of the Orin NX rig
-  is mounted upside down, so `VisionSense_NX_3F0R` sets
-  `camera.flip: "rotate-180"`. Set
-  `hardware.mono_calibration_file` to the mono camera's intrinsics for
-  accurate BEV distances.
+In both layouts the AR0234 stereo pair faces forward and 2D perception
+(detection, signs, lanes, ADAS, BEV, fused view) runs on the stereo main eye.
+The layout says what the mono CSI camera on CAM0 is for:
+
+- **2F1R**: the mono camera faces the driver and feeds the driver monitor.
+- **3F0R**: the mono camera faces the road too, for fleet data collection.
+  In place of the driver monitor it feeds the
+  [road damage node](#8-road-damage-node-road_damage), which segments
+  potholes and logs them with their GPS position; the dashboard shows it as
+  the **Road** view. The mono camera of the Orin NX rig is mounted upside
+  down, so `VisionSense_NX_3F0R` sets `camera.flip: "rotate-180"`.
 
 The layout is the `hardware.layout` setting in `config/config.yaml`, so a
 checkout can be switched without changing branch.
