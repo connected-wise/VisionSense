@@ -392,7 +392,7 @@ engine, so another YOLOv8-seg or YOLO11-seg export works with only the
 The repo holds only the ONNX file. Build the engine on the device with
 `bash scripts/regenerate_engines.sh road`, then rebuild the workspace. On an
 Orin NX 8GB the model alone takes about 7 ms per frame; inside the full 3F0R
-pipeline, which keeps the GPU fully loaded, the node runs at about 19 Hz.
+pipeline, which keeps the GPU fully loaded, the node runs at 13 to 19 Hz.
 
 ---
 
