@@ -628,6 +628,11 @@ for i in (0,40,80):
 
 ### Desktop Launcher
 Double-click the **VisionSense** icon on the desktop.
+It runs `launch_visionsense.sh` in a terminal and opens the dashboard; closing the terminal stops everything.
+`install_all_deps.sh` installs it. To (re)install it by hand:
+```bash
+bash scripts/install_desktop_launcher.sh
+```
 
 ### Command Line
 ```bash

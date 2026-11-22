@@ -530,7 +530,10 @@ else
     echo "✓ visionsense.launch.py starts the IMX477 itself — no boot service"
 fi
 
-echo -e "\n18. Verifying installations..."
+echo -e "\n18. Installing the desktop launcher..."
+bash "${SCRIPT_DIR}/scripts/install_desktop_launcher.sh" || echo "  (desktop launcher not installed — continuing)"
+
+echo -e "\n19. Verifying installations..."
 echo "Checking CUDA..."
 nvcc --version || echo "✗ CUDA not found"
 

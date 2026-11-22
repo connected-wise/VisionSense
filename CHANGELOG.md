@@ -32,6 +32,9 @@
   same page took over 4 minutes.
 - `imu_gps` reads the MMC5983MA magnetometer of the SARA-R5 board as well as
   the LIS3MDL of the BerryGPS-IMU.
+- Desktop launcher (`scripts/install_desktop_launcher.sh`, run by
+  `install_all_deps.sh`): a **VisionSense** icon that runs
+  `launch_visionsense.sh` in a terminal and opens the dashboard.
 
 ### Changed
 
@@ -43,6 +46,12 @@
 
 ### Fixed
 
+- The dashboard did not open on Ubuntu 24.04: the snap Chromium cannot write
+  its kiosk profile to `~/.cache` and exited at once. The profile now goes in
+  `~/snap/chromium/common` when the snap is installed.
+- The dashboard opened in a normal window: `--kiosk` has no effect with that
+  Chromium, so `scripts/x11_fullscreen.py` asks the window manager for
+  fullscreen.
 - `imu_gps` reported twice the real acceleration: the LSM6DSL was set to ±2 g
   but scaled as ±4 g. It is now set to ±4 g.
 - Stereo frames green below the top, with every frame failing its payload

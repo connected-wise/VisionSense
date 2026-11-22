@@ -7,7 +7,7 @@ import os
 import subprocess
 import yaml
 
-from ament_index_python import get_package_share_directory
+from ament_index_python import get_package_prefix, get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import ExecuteProcess, IncludeLaunchDescription, TimerAction
@@ -366,6 +366,8 @@ def generate_launch_description():
 	# Fix: poll the server, use a dedicated --user-data-dir so we always get a
 	# fresh kiosk instance, and force the autoplay policy.
 	if ui_dashboard:
+		fullscreen_helper = os.path.join(
+			get_package_prefix("visionconnect"), "lib", "visionconnect", "x11_fullscreen.py")
 		kiosk_cmd = (
 			"for bin in chromium-browser chromium google-chrome chrome; do "
 			"  if command -v \"$bin\" >/dev/null 2>&1; then BROWSER=\"$bin\"; break; fi; "
@@ -384,8 +386,18 @@ def generate_launch_description():
 			# Dedicated user-data-dir → fresh chromium instance, never reuses
 			# an already-running profile (which would ignore --kiosk and load
 			# stale state). Cleared every launch keeps things deterministic.
+			# A snap Chromium (Ubuntu 24.04) cannot write to hidden folders in
+			# $HOME: with the profile in ~/.cache it exits with code 21 and
+			# "Failed to create SingletonLock: Permission denied".
 			"DATA_DIR=\"$HOME/.cache/visionsense-kiosk\"; "
+			"if [ -d \"$HOME/snap/chromium/common\" ]; then "
+			"  DATA_DIR=\"$HOME/snap/chromium/common/visionsense-kiosk\"; "
+			"fi; "
 			"rm -rf \"$DATA_DIR\" 2>/dev/null; mkdir -p \"$DATA_DIR\"; "
+			# --kiosk alone leaves the snap Chromium of Ubuntu 24.04 in a normal
+			# window, so also ask the window manager for fullscreen once the
+			# dashboard window exists (matched by the page title).
+			f"( python3 '{fullscreen_helper}' 'VisionSense Dashboard' 30 ) & "
 			"exec \"$BROWSER\" "
 			"  --user-data-dir=\"$DATA_DIR\" "
 			"  --kiosk "
