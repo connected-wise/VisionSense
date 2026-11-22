@@ -33,6 +33,14 @@
 - `imu_gps` reads the MMC5983MA magnetometer of the SARA-R5 board as well as
   the LIS3MDL of the BerryGPS-IMU.
 
+### Changed
+
+- With an IMX477 on CAM0, `visionsense.launch.py` starts the mono camera
+  itself and `install_all_deps.sh` no longer installs (and removes)
+  `visionsense-imx219.service`. The boot service was a workaround for the
+  IMX219, which cannot be reopened through Argus; the IMX477 can. IMX219
+  installs are unchanged.
+
 ### Fixed
 
 - `imu_gps` reported twice the real acceleration: the LSM6DSL was set to ±2 g

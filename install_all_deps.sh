@@ -471,8 +471,9 @@ sudo systemctl daemon-reload
 sudo systemctl restart nvargus-daemon || echo "  (nvargus-daemon restart failed — continuing)"
 echo "✓ nvargus-daemon override installed"
 
-echo -e "\n17. Installing persistent IMX219 driver-monitor camera service..."
-# The Jetson Argus stack wedges on Producer close on this rig — every second
+echo -e "\n17. Mono camera startup (${VS_DRIVER_CAM})..."
+# IMX219 only. With an IMX477 the launch file starts the mono camera itself.
+# The Jetson Argus stack wedges on Producer close with the IMX219 — every second
 # nvarguscamerasrc session fails until reboot (bare gst-launch reproduces it).
 # Workaround: keep one long-lived camera session alive for the whole uptime via
 # systemd, and have VisionSense subscribe to /camera/raw as a normal ROS topic
@@ -480,41 +481,53 @@ echo -e "\n17. Installing persistent IMX219 driver-monitor camera service..."
 # the camera. See scripts/visionsense-imx219.service for the unit and
 # scripts/imx219-csi-warmup.sh for the boot-time Arducam V4L2 warmup that keeps
 # Argus' sensor-1 probe from poisoning IMX219 capture on fresh boot.
-IMX219_UNIT_SRC="${SCRIPT_DIR}/scripts/visionsense-imx219.service"
 IMX219_UNIT_DST=/etc/systemd/system/visionsense-imx219.service
-IMX219_WARMUP_SRC="${SCRIPT_DIR}/scripts/imx219-csi-warmup.sh"
-if [ -f "$IMX219_UNIT_SRC" ] && [ -f "$IMX219_WARMUP_SRC" ]; then
-    # The unit in the repo is written for user jetson, /home/jetson/VisionSense
-    # and Humble; fill in this machine's user, checkout and ROS distro.
-    VS_USER="$(id -un)"
-    VS_GROUP="$(id -gn)"
-    sed -e "s#/home/jetson/VisionSense#${SCRIPT_DIR}#g" \
-        -e "s#^User=jetson#User=${VS_USER}#" \
-        -e "s#^Group=jetson#Group=${VS_GROUP}#" \
-        -e "s#/opt/ros/humble/#/opt/ros/${ROS_DISTRO}/#g" \
-        "$IMX219_UNIT_SRC" > /tmp/visionsense-imx219.service
-    sudo install -m 0644 /tmp/visionsense-imx219.service "$IMX219_UNIT_DST"
-    rm -f /tmp/visionsense-imx219.service
-    sudo chmod +x "$IMX219_WARMUP_SRC"
-    sudo systemctl daemon-reload
-    sudo systemctl enable visionsense-imx219.service || true
-    echo "✓ visionsense-imx219.service installed and enabled (starts at next boot)"
-    # Passwordless sudo for the launch script's re-kick of this one unit.
-    SUDOERS_SRC="${SCRIPT_DIR}/scripts/sudoers.visionsense-imx219"
-    SUDOERS_DST=/etc/sudoers.d/visionsense-imx219
-    if [ -f "$SUDOERS_SRC" ]; then
-        sed "s#^jetson #${VS_USER} #" "$SUDOERS_SRC" > /tmp/sudoers.visionsense-imx219
-        sudo install -m 0440 -o root -g root /tmp/sudoers.visionsense-imx219 "$SUDOERS_DST"
-        rm -f /tmp/sudoers.visionsense-imx219
-        if sudo visudo -c -f "$SUDOERS_DST" >/dev/null 2>&1; then
-            echo "✓ /etc/sudoers.d/visionsense-imx219 installed (passwordless re-kick)"
-        else
-            sudo rm -f "$SUDOERS_DST"
-            echo "✗ sudoers file failed visudo -c — removed; launch script will prompt for password"
+if [ "$VS_DRIVER_CAM" = "imx219" ]; then
+    IMX219_UNIT_SRC="${SCRIPT_DIR}/scripts/visionsense-imx219.service"
+    IMX219_WARMUP_SRC="${SCRIPT_DIR}/scripts/imx219-csi-warmup.sh"
+    if [ -f "$IMX219_UNIT_SRC" ] && [ -f "$IMX219_WARMUP_SRC" ]; then
+        # The unit in the repo is written for user jetson, /home/jetson/VisionSense
+        # and Humble; fill in this machine's user, checkout and ROS distro.
+        VS_USER="$(id -un)"
+        VS_GROUP="$(id -gn)"
+        sed -e "s#/home/jetson/VisionSense#${SCRIPT_DIR}#g" \
+            -e "s#^User=jetson#User=${VS_USER}#" \
+            -e "s#^Group=jetson#Group=${VS_GROUP}#" \
+            -e "s#/opt/ros/humble/#/opt/ros/${ROS_DISTRO}/#g" \
+            "$IMX219_UNIT_SRC" > /tmp/visionsense-imx219.service
+        sudo install -m 0644 /tmp/visionsense-imx219.service "$IMX219_UNIT_DST"
+        rm -f /tmp/visionsense-imx219.service
+        sudo chmod +x "$IMX219_WARMUP_SRC"
+        sudo systemctl daemon-reload
+        sudo systemctl enable visionsense-imx219.service || true
+        echo "✓ visionsense-imx219.service installed and enabled (starts at next boot)"
+        # Passwordless sudo for the launch script's re-kick of this one unit.
+        SUDOERS_SRC="${SCRIPT_DIR}/scripts/sudoers.visionsense-imx219"
+        SUDOERS_DST=/etc/sudoers.d/visionsense-imx219
+        if [ -f "$SUDOERS_SRC" ]; then
+            sed "s#^jetson #${VS_USER} #" "$SUDOERS_SRC" > /tmp/sudoers.visionsense-imx219
+            sudo install -m 0440 -o root -g root /tmp/sudoers.visionsense-imx219 "$SUDOERS_DST"
+            rm -f /tmp/sudoers.visionsense-imx219
+            if sudo visudo -c -f "$SUDOERS_DST" >/dev/null 2>&1; then
+                echo "✓ /etc/sudoers.d/visionsense-imx219 installed (passwordless re-kick)"
+            else
+                sudo rm -f "$SUDOERS_DST"
+                echo "✗ sudoers file failed visudo -c — removed; launch script will prompt for password"
+            fi
         fi
+    else
+        echo "  (scripts/visionsense-imx219.service or imx219-csi-warmup.sh missing — skipping)"
     fi
 else
-    echo "  (scripts/visionsense-imx219.service or imx219-csi-warmup.sh missing — skipping)"
+    # A unit left over from an IMX219 install would hold Argus sensor 0 and
+    # keep the launch file from starting the camera.
+    if [ -f "$IMX219_UNIT_DST" ]; then
+        sudo systemctl disable --now visionsense-imx219.service || true
+        sudo rm -f "$IMX219_UNIT_DST" /etc/sudoers.d/visionsense-imx219
+        sudo systemctl daemon-reload
+        echo "✓ Removed visionsense-imx219.service (not needed with the IMX477)"
+    fi
+    echo "✓ visionsense.launch.py starts the IMX477 itself — no boot service"
 fi
 
 echo -e "\n18. Verifying installations..."
