@@ -1,0 +1,15 @@
+# PPP over the SARA-R5 mux channel 2 (installed as /etc/ppp/peers/sara-r5).
+# NetworkManager's "LTE" connection starts it and owns the address, route and
+# DNS; pppd exits when the link drops and NetworkManager reconnects.
+/dev/gsmtty2
+115200
+linkname sara-r5
+noauth
+local
+nocrtscts
+noipdefault
+noccp
+novj
+lcp-echo-interval 30
+lcp-echo-failure 4
+connect "/usr/sbin/chat -v -f /etc/chatscripts/sara-r5"

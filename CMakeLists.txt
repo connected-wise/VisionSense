@@ -414,6 +414,7 @@ install(TARGETS stereo_depth_ffs DESTINATION lib/${PROJECT_NAME})
 # Install Python scripts
 install(PROGRAMS
     scripts/display_driver_monitor.py
+    scripts/x11_fullscreen.py
     scripts/test_stereo_from_files.py
     scripts/display_disparity.py
     scripts/stereo_depth_lightstereo.py

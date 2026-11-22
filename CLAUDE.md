@@ -25,7 +25,7 @@ source install/setup.bash
 
 # Full pipeline (always launch via the helper, NOT plain `ros2 launch` —
 # the script sets FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA, sweeps stale
-# /dev/shm/fastrtps_* segments, and kicks the IMX219 service post-discovery)
+# /dev/shm/fastrtps_* segments, and on IMX219 rigs kicks the IMX219 service post-discovery)
 ./launch_visionsense.sh
 ```
 
@@ -43,7 +43,7 @@ ros2 run visionconnect stereo_depth_lightstereo.py   # Python fallback (installe
 
 | Node | Source | Purpose |
 |---|---|---|
-| `camera` | `src/node_camera.cpp` | Mono camera capture (used outside the full launch — see IMX219 note below) |
+| `camera` | `src/node_camera.cpp` | Mono camera capture (started by the launch with an IMX477; by a systemd unit with an IMX219 — see IMX219 note below) |
 | `camera_stereo` | `src/node_camera_stereo.cpp` | Arducam stereo: capture 3840×1200, CUDA crop+split+flip into two 1440×900 rgb8 streams, publish + `CameraInfo` from `stereo_calib.yaml` |
 | `detect` | `src/node_detect.cpp` | YOLOv8 (TensorRT) + BYTE tracker, publishes detections + cropped traffic-sign sub-images |
 | `classify` | `src/node_classify.cpp` | YOLOv8-cls (TensorRT) refining sign sub-images |
@@ -66,7 +66,7 @@ ros2 run visionconnect stereo_depth_lightstereo.py   # Python fallback (installe
 
 ### Critical data-flow facts
 
-1. **`/camera/raw` is published by a systemd unit**, not by `visionsense.launch.py`. The IMX219 driver-monitor camera lives in `visionsense-imx219.service` — see [IMX219 reopen bug](#imx219-reopen-bug-and-systemd-service) below.
+1. **Who publishes `/camera/raw` depends on the mono sensor.** With an IMX477, `visionsense.launch.py` starts the `camera` node itself. With an IMX219, the camera lives in `visionsense-imx219.service` and the launch only subscribes (it skips its own `camera` node whenever that unit is active) — see [IMX219 reopen bug](#imx219-reopen-bug-and-systemd-service) below.
 
 2. **Stereo eye topic labels match the physical sensor wiring after the user's sensor swap.** The old in-code `cudaStereoCropSplitFlip(... right_gpu, left_gpu, ...)` swap was removed; the kernel now goes straight `(leftOut → /camera_stereo/left, rightOut → /camera_stereo/right)`. `stereo.main_eye` in `config/config.yaml` was flipped from `right` to `left` to match.
 
@@ -114,7 +114,9 @@ If `|Tz|` ends up large (the optimizer attributing residual error to phantom Z b
 
 ## IMX219 Reopen Bug and Systemd Service
 
-The Jetson Argus stack (libargus + nvargus-daemon + tegra-camrtc) does not survive a Producer close on this rig — every second `nvarguscamerasrc` session fails with `INVALID_SETTINGS` / `Argus Correctable Error Status` until reboot. Bare `gst-launch-1.0 nvarguscamerasrc ! ...` reproduces it, so the bug is in NVIDIA's stack, not VisionSense.
+**IMX219 rigs only.** An IMX477 reopens cleanly (tested: 4 close/reopen cycles on the Orin NX 8GB, JetPack 7.2.1), so the launch file owns that camera and none of this section applies.
+
+With the IMX219, the Jetson Argus stack (libargus + nvargus-daemon + tegra-camrtc) does not survive a Producer close — every second `nvarguscamerasrc` session fails with `INVALID_SETTINGS` / `Argus Correctable Error Status` until reboot. Bare `gst-launch-1.0 nvarguscamerasrc ! ...` reproduces it, so the bug is in NVIDIA's stack, not VisionSense.
 
 **Workaround:** the IMX219 is owned by `visionsense-imx219.service` — a systemd unit that opens the camera once at boot, never closes it, and publishes `/camera/raw` for the entire uptime. VisionSense's `visionsense.launch.py` does NOT instantiate a `camera` node; it just subscribes to `/camera/raw`.
 
@@ -123,9 +125,9 @@ The unit:
 - Pre-flight: `scripts/imx219-csi-warmup.sh` does a brief Arducam V4L2 stream-on/off cycle on `/dev/video1` before opening Argus. Without this, Argus's probe of sensor 1 (the Arducam) at boot poisons IMX219 capture with cascading SCF/PD_CRC errors ~5 s in.
 - Passwordless sudo for `systemctl restart visionsense-imx219.service` is set via `/etc/sudoers.d/visionsense-imx219`. `launch_visionsense.sh` uses this to re-kick the service ~3 s after subscribers come up — a fix for a FastDDS SHM late-joiner discovery race.
 
-`install_all_deps.sh` step 17 installs all of the above.
+`install_all_deps.sh` step 17 installs all of the above for `VS_DRIVER_CAM=imx219`, and removes the unit for `VS_DRIVER_CAM=imx477`.
 
-**Do NOT `systemctl stop visionsense-imx219.service` during normal operation** — that closes Argus and triggers the bug. Only stop it immediately before a reboot.
+**On IMX219 rigs, do NOT `systemctl stop visionsense-imx219.service` during normal operation** — that closes Argus and triggers the bug. Only stop it immediately before a reboot.
 
 ## DDS / FastDDS Quirks
 
@@ -160,7 +162,7 @@ All are referenced from `CMakeLists.txt` `rosidl_generate_interfaces` block.
 
 | Symptom | First thing to check |
 |---|---|
-| `/camera/raw` silent, `driver_monitor` idle | `systemctl status visionsense-imx219.service` — must be active |
+| `/camera/raw` silent, `driver_monitor` idle | IMX477: is the `camera` node in the launch output? IMX219: `systemctl status visionsense-imx219.service` — must be active |
 | `/camera_stereo/right/image_raw` at 2 Hz, left at 30 Hz | `cat /proc/$(pgrep -f camera_stereo)/environ \| grep FASTDDS` — env var must be set |
 | Topics look silent despite "ready" log | `ls /dev/shm/fastrtps_* \| wc -l` — wipe if >5–10 (`rm -f /dev/shm/fastrtps_*`) |
 | Stereo depth all yellow / no structure | `depth_vmax` in `config/config.yaml` — drop to 5.0 for indoor scenes (was 20.0 by default) |
@@ -171,5 +173,5 @@ All are referenced from `CMakeLists.txt` `rosidl_generate_interfaces` block.
 
 - Don't add sidecar processes (rosbridge, http.server, etc.) — extend an existing C++ node instead.
 - Don't bypass `launch_visionsense.sh` — it does several things `ros2 launch` alone doesn't.
-- Don't `systemctl stop visionsense-imx219.service` while VisionSense is running.
+- IMX219 rigs: don't `systemctl stop visionsense-imx219.service` while VisionSense is running.
 - Don't run multiple `compute_stereo_calib.py` in parallel — it parallelizes across all cores already, and you'll just thrash.

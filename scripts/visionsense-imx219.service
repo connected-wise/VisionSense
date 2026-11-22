@@ -1,7 +1,7 @@
 [Unit]
 # Persistent owner of the IMX219 driver-monitor camera (Argus producer).
-# Also used unchanged for an IMX477 on CAM0 (imx477 combined overlay): the
-# unit opens Argus sensor 0 (csi://0), whichever sensor that is.
+# IMX219 only: an IMX477 on CAM0 reopens cleanly, so visionsense.launch.py
+# starts that camera itself and this unit is not installed.
 #
 # Why this exists:
 #   The Jetson Argus stack (libargus + nvargus-daemon + tegra-camrtc RTCPU

@@ -75,26 +75,30 @@ echo "Press Ctrl+C to stop all nodes"
 echo "================================================"
 echo ""
 
-# Re-kick the persistent IMX219 service once VisionSense subscribers come up.
+# IMX219 rigs only: re-kick the persistent IMX219 service once VisionSense
+# subscribers come up. (With an IMX477 the launch file starts the mono camera
+# itself and the service is not installed.)
 # Reason: with the SHM-only FastDDS profile, a publisher that started before
 # any subscribers existed (which is what visionsense-imx219.service is doing
 # from boot) is not always rediscovered by late-joining subscribers. Restarting
 # the service after `ros2 launch` is up forces a fresh participant
 # announcement that the now-existing subscribers do see. Passwordless sudo
 # for this exact command is configured in /etc/sudoers.d/visionsense-imx219.
-(
-    for _ in $(seq 1 30); do
-        if pgrep -f "driver_monitor|camera_stereo" >/dev/null 2>&1; then
-            sleep 3
-            sudo -n systemctl restart visionsense-imx219.service 2>&1 \
-                | sed 's/^/[imx219-restart] /' || true
-            break
-        fi
-        sleep 1
-    done
-) &
-IMX219_KICK_PID=$!
-trap 'kill $IMX219_KICK_PID 2>/dev/null; wait $IMX219_KICK_PID 2>/dev/null' EXIT
+if systemctl is-active --quiet visionsense-imx219.service; then
+    (
+        for _ in $(seq 1 30); do
+            if pgrep -f "driver_monitor|camera_stereo" >/dev/null 2>&1; then
+                sleep 3
+                sudo -n systemctl restart visionsense-imx219.service 2>&1 \
+                    | sed 's/^/[imx219-restart] /' || true
+                break
+            fi
+            sleep 1
+        done
+    ) &
+    IMX219_KICK_PID=$!
+    trap 'kill $IMX219_KICK_PID 2>/dev/null; wait $IMX219_KICK_PID 2>/dev/null' EXIT
+fi
 
 # Launch the main launch file. Window closes cleanly on exit.
 ros2 launch visionconnect visionsense.launch.py

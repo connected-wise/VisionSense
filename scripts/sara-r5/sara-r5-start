@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""ExecStartPost of sara-r5-mux.service.
+
+Waits until the SARA-R5 answers on the first mux channel, makes sure GNSS
+output is routed to the mux (/dev/gsmtty4), starts the GNSS receiver and
+registers on the preferred operator (SARA_R5_OPERATOR in /etc/default/sara-r5).
+
+AT+UGPRF (GNSS routing) is stored in the modem but only applies after a
+modem restart. If it is not set yet, this sets it, restarts the modem and
+exits with an error; systemd then restarts the mux once the modem is back.
+"""
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+AT_CHANNEL = "/dev/gsmtty1"
+PPP_CHANNEL = "/dev/gsmtty2"
+GNSS_ROUTE = 2          # AT+UGPRF: GNSS data over the multiplexer
+GNSS_START = "AT+UGPS=1,1,67"  # on, local aiding, GPS+SBAS+Galileo+GLONASS
+# Preferred network as MCC+MNC (310410: AT&T); empty leaves the choice to the modem
+OPERATOR = os.environ.get("SARA_R5_OPERATOR", "")
+
+
+def open_channel(path, timeout):
+    """Open a mux channel once its DLCI is up, or return None."""
+    end = time.time() + timeout
+    while time.time() < end:
+        fd = None
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            tty.setraw(fd)
+            attrs = termios.tcgetattr(fd)
+            attrs[2] |= termios.CLOCAL
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+            if "OK" in at(fd, "AT", 2):
+                return fd
+        except (OSError, termios.error):
+            pass  # the channel is not up yet
+        if fd is not None:
+            os.close(fd)
+        time.sleep(1)
+    return None
+
+
+def at(fd, cmd, timeout=5):
+    """Send an AT command and return the response up to OK or ERROR."""
+    os.write(fd, (cmd + "\r").encode())
+    buf = b""
+    end = time.time() + timeout
+    while time.time() < end:
+        ready, _, _ = select.select([fd], [], [], 0.2)
+        if ready:
+            buf += os.read(fd, 4096)
+            if b"OK" in buf or b"ERROR" in buf:
+                break
+    return buf.decode(errors="replace")
+
+
+def select_operator(fd, plmn):
+    """Register on plmn, or on any network if it cannot be used."""
+    at(fd, "AT+COPS=3,2")  # report the operator as MCC+MNC
+    if f'"{plmn}"' in at(fd, "AT+COPS?"):
+        return
+    # Mode 4: manual, falling back to automatic. Answers once registered,
+    # which can take minutes.
+    resp = at(fd, f'AT+COPS=4,2,"{plmn}"', 240)
+    print(f"operator {plmn}: {resp.strip() or 'no answer'}")
+
+
+def main():
+    fd = open_channel(AT_CHANNEL, 30)
+    if fd is None:
+        print(f"no AT response on {AT_CHANNEL}")
+        return 1
+
+    if f"+UGPRF: {GNSS_ROUTE}," not in at(fd, "AT+UGPRF?"):
+        print("routing GNSS to the multiplexer, restarting the modem")
+        at(fd, f"AT+UGPRF={GNSS_ROUTE}")
+        at(fd, "AT+CFUN=16", 10)
+        return 1
+
+    if "+UGPS: 0" in at(fd, "AT+UGPS?"):
+        resp = at(fd, GNSS_START, 20)
+        if "OK" not in resp:
+            print(f"{GNSS_START} failed: {resp.strip()}")
+            return 1
+
+    if OPERATOR:
+        select_operator(fd, OPERATOR)
+
+    # Right after the mux starts the modem may not serve the PPP channel yet
+    ppp = open_channel(PPP_CHANNEL, 30)
+    if ppp is None:
+        print(f"no AT response on {PPP_CHANNEL}")
+        return 1
+    os.close(ppp)
+    print("SARA-R5 ready: AT on /dev/gsmtty1, PPP on /dev/gsmtty2, GNSS on /dev/gsmtty4")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
