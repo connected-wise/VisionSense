@@ -61,13 +61,12 @@ def generate_launch_description():
 		main_eye = "left"
 	main_image_topic = f"/camera_stereo/{main_eye}/image_raw"
 
-	# Camera layout (hardware.layout in config.yaml):
-	#   2F1R — stereo pair forward, mono CSI camera (/camera/raw) facing the
-	#          driver. 2D perception runs on the stereo main eye.
-	#   3F0R — stereo pair and mono camera all facing forward (fleet data
-	#          collection). 2D perception (detect, classify, lanedet, adas,
-	#          gui, bev) runs on the mono camera and the stereo pair only
-	#          produces depth. The mono camera also feeds road_damage
+	# Camera layout (hardware.layout in config.yaml). In both layouts the
+	# stereo pair faces forward and 2D perception (detect, classify, lanedet,
+	# adas, gui, bev) runs on the stereo main eye; the layout only decides
+	# what the mono CSI camera (/camera/raw) is for:
+	#   2F1R — it faces the driver: driver monitor.
+	#   3F0R — it faces the road (fleet data collection): road_damage
 	#          (pothole segmentation), which takes the driver monitor's place.
 	hw = config.get("hardware", {}) or {}
 	layout = str(hw.get("layout", "2F1R")).upper()
@@ -75,9 +74,8 @@ def generate_launch_description():
 		print(f"[visionsense.launch] WARNING: hardware.layout='{layout}' invalid; defaulting to '2F1R'")
 		layout = "2F1R"
 	mono_forward = layout == "3F0R"
-	if mono_forward:
-		main_image_topic = "/camera/raw"
-	print(f"[visionsense.launch] camera layout {layout}: 2D perception on {main_image_topic}")
+	print(f"[visionsense.launch] camera layout {layout}: 2D perception on {main_image_topic}, "
+	      f"mono camera for {'road damage' if mono_forward else 'driver monitor'}")
 
 	# UI toggles. `display` controls the on-screen cv::imshow window (passed to
 	# gui as a ROS parameter). `dashboard` controls whether we open Chromium
@@ -169,11 +167,6 @@ def generate_launch_description():
 	# consumed by gui/bev — wrong dims here = tilted lane regions on screen.
 	rotated_lenses = bool(cs_params.get("rotated_lenses", False))
 	adas_img_w, adas_img_h = (1200, 1200) if rotated_lenses else (1440, 900)
-	if mono_forward:
-		# lanedet reads the mono camera, published at camera.width/height.
-		mono_params = config.get("camera", {}).get("ros__parameters", {})
-		adas_img_w = int(mono_params.get("width", 1280))
-		adas_img_h = int(mono_params.get("height", 720))
 	adas_params = dict(config.get("adas", {}).get("ros__parameters", {}))
 	adas_params["image_width"]  = adas_img_w
 	adas_params["image_height"] = adas_img_h
@@ -286,15 +279,6 @@ def generate_launch_description():
 	# single source of truth.
 	bev_params = dict(config["bev"]["ros__parameters"])
 	bev_params["calibration_file"] = cs_params["calibration_file"]
-	if mono_forward:
-		# BEV projects detections/lanes from the 2D-perception camera, which
-		# in 3F0R is the mono camera, so it needs that camera's intrinsics.
-		mono_calib = str(hw.get("mono_calibration_file", "") or "")
-		bev_params["calibration_file"] = (
-			os.path.join(config_dir, mono_calib) if mono_calib else "")
-		if not mono_calib:
-			print("[visionsense.launch] WARNING: hardware.mono_calibration_file is empty — "
-			      "BEV uses its built-in intrinsics, so BEV distances are approximate")
 	bev_node = Node(
 		package="visionconnect",
 		name="bev",
