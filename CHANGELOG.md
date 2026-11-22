@@ -57,6 +57,10 @@
   IMX219, which cannot be reopened through Argus; the IMX477 can. IMX219
   installs are unchanged.
 
+- In 3F0R, detection, signs, lanes, ADAS, BEV and the fused view run on the
+  stereo main eye again, as in 2F1R (v2.0.0 moved them to the mono camera).
+  The mono camera is only for road damage, and
+  `hardware.mono_calibration_file` is gone.
 - The dashboard's driver view is sent at 640x360 (was 640x480), the mono
   camera's 16:9 shape.
 
