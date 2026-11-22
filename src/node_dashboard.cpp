@@ -88,6 +88,19 @@ std::vector<uint8_t> jpeg_encode(const cv::Mat &img) {
     return buffer;
 }
 
+// Wrap a ROS image as a BGR cv::Mat. Everything leaving this node is BGR
+// (cv::imencode and the WebRTC appsrc caps both expect it), but the cameras,
+// driver monitor and road damage publish rgb8; without the swap those streams
+// reach the browser with red and blue exchanged.
+void message_to_bgr(const sensor_msgs::ImageConstPtr &msg, cv::Mat &img) {
+    convert_message_to_frame(msg, img);
+    if (!img.empty() && msg->encoding == "rgb8") {
+        cv::Mat bgr;
+        cv::cvtColor(img, bgr, cv::COLOR_RGB2BGR);
+        img = std::move(bgr);
+    }
+}
+
 // Resize-if-needed helper. Skips the copy when dimensions already match.
 void resize_to(cv::Mat &img, int width, int height) {
     if (img.cols == width && img.rows == height) return;
@@ -149,7 +162,7 @@ void gui_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
     cv::Mat img;
-    convert_message_to_frame(input, img);
+    message_to_bgr(input, img);
     resize_to(img, 1280, 720);
     fan_out(visionsense::STREAM_FUSED, img, g_count_fused);
 }
@@ -163,7 +176,7 @@ void camera_left_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
     cv::Mat img;
-    convert_message_to_frame(input, img);
+    message_to_bgr(input, img);
     resize_to(img, 1280, 720);
     fan_out(visionsense::STREAM_CAMERA, img, g_count_camera);
 }
@@ -173,7 +186,7 @@ void camera_right_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
     cv::Mat img;
-    convert_message_to_frame(input, img);
+    message_to_bgr(input, img);
     resize_to(img, 1280, 720);
     fan_out(visionsense::STREAM_CAMERA, img, g_count_camera);
 }
@@ -182,7 +195,7 @@ void depth_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
     cv::Mat img;
-    convert_message_to_frame(input, img);
+    message_to_bgr(input, img);
     // depth_color upstream is already turbo/inferno-colorized.
     resize_to(img, 720, 450);
     fan_out(visionsense::STREAM_DEPTH, img, g_count_depth);
@@ -194,7 +207,7 @@ void driver_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
     cv::Mat img;
-    convert_message_to_frame(input, img);
+    message_to_bgr(input, img);
     resize_to(img, 640, 360);
     fan_out(visionsense::STREAM_DRIVER, img, g_count_driver);
 }
@@ -203,7 +216,7 @@ void bev_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
     cv::Mat img;
-    convert_message_to_frame(input, img);
+    message_to_bgr(input, img);
     // BEV is 480×360 native; no resize needed.
     fan_out(visionsense::STREAM_BEV, img, g_count_bev);
 }
@@ -213,7 +226,7 @@ void detection_callback(const visionconnect::msg::Detect::SharedPtr input) {
     if (!rate_limit(last)) return;
     auto img_msg = std::make_shared<sensor_msgs::msg::Image>(input->image);
     cv::Mat img;
-    convert_message_to_frame(img_msg, img);
+    message_to_bgr(img_msg, img);
     auto jpeg = jpeg_encode(img);
     if (!jpeg.empty()) {
         g_server->push_jpeg(visionsense::STREAM_DETECT, std::move(jpeg));
@@ -240,7 +253,7 @@ void lanes_callback(const visionconnect::msg::Lanes::SharedPtr input) {
     if (!rate_limit(last)) return;
     auto lane_msg = std::make_shared<sensor_msgs::msg::Image>(input->laneimg);
     cv::Mat lane_img;
-    convert_message_to_frame(lane_msg, lane_img);
+    message_to_bgr(lane_msg, lane_img);
     resize_to(lane_img, 640, 360);
     auto jpeg = jpeg_encode(lane_img);
     if (!jpeg.empty()) {
@@ -270,7 +283,7 @@ void classify_callback(const visionconnect::msg::Signs::SharedPtr input) {
     for (size_t i = 0; i < input->images.size() && i < input->labels.size(); ++i) {
         auto im = std::make_shared<sensor_msgs::msg::Image>(input->images[i]);
         cv::Mat crop;
-        convert_message_to_frame(im, crop);
+        message_to_bgr(im, crop);
         if (crop.empty()) continue;
         cv::resize(crop, crop, cv::Size(200, 200));
         std::string info = input->labels[i];
