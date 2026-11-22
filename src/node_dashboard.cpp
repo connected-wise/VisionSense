@@ -59,6 +59,9 @@ std::unique_ptr<WebRTCManager>   g_webrtc;
 std::atomic<uint32_t> g_count_fused{0};
 std::atomic<uint32_t> g_count_depth{0};
 std::atomic<uint32_t> g_count_driver{0};
+// What stream 3 and the "driver" state chip show: "driver" (driver monitor)
+// or "road" (road damage). Sent to the browser in every fps message.
+std::string g_aux_view = "driver";
 std::atomic<uint32_t> g_count_bev{0};
 std::atomic<uint32_t> g_count_camera{0};
 
@@ -185,12 +188,14 @@ void depth_callback(const sensor_msgs::ImageConstPtr input) {
     fan_out(visionsense::STREAM_DEPTH, img, g_count_depth);
 }
 
+// Stream 3 carries the mono camera's view: the driver monitor in 2F1R, the
+// road damage overlay in 3F0R (see the aux_view parameter).
 void driver_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
     cv::Mat img;
     convert_message_to_frame(input, img);
-    resize_to(img, 640, 480);
+    resize_to(img, 640, 360);
     fan_out(visionsense::STREAM_DRIVER, img, g_count_driver);
 }
 
@@ -354,7 +359,8 @@ void fps_tick() {
       << ",\"depth\":" << d
       << ",\"driver\":" << dr
       << ",\"bev\":" << b
-      << ",\"camera\":" << cam << "}";
+      << ",\"camera\":" << cam
+      << ",\"aux\":\"" << g_aux_view << "\"}";
     g_server->push_json(o.str());
 }
 
@@ -364,6 +370,10 @@ void fps_tick() {
 
 int main(int argc, char **argv) {
     ROS_CREATE_NODE("dashboard");
+
+    ROS_DECLARE_PARAMETER("aux_view", g_aux_view);
+    ROS_GET_PARAMETER("aux_view", g_aux_view);
+    if (g_aux_view != "road") g_aux_view = "driver";
 
     std::string mount_dir;
     try {

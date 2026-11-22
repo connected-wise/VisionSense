@@ -64,10 +64,11 @@ def generate_launch_description():
 	# Camera layout (hardware.layout in config.yaml):
 	#   2F1R — stereo pair forward, mono CSI camera (/camera/raw) facing the
 	#          driver. 2D perception runs on the stereo main eye.
-	#   3F0R — stereo pair and mono camera all facing forward. 2D perception
-	#          (detect, classify, lanedet, adas, gui, bev) runs on the mono
-	#          camera, the stereo pair only produces depth, and there is no
-	#          driver monitor.
+	#   3F0R — stereo pair and mono camera all facing forward (fleet data
+	#          collection). 2D perception (detect, classify, lanedet, adas,
+	#          gui, bev) runs on the mono camera and the stereo pair only
+	#          produces depth. The mono camera also feeds road_damage
+	#          (pothole segmentation), which takes the driver monitor's place.
 	hw = config.get("hardware", {}) or {}
 	layout = str(hw.get("layout", "2F1R")).upper()
 	if layout not in ("2F1R", "3F0R"):
@@ -188,9 +189,26 @@ def generate_launch_description():
 	)
 	ld.add_action(adas_node)
 
-	# Driver Monitor - TensorRT accelerated face detection + gaze estimation
-	# (2F1R only: in 3F0R the mono camera faces the road.)
-	if not mono_forward:
+	# The mono camera's consumer, and what the dashboard shows as stream 3:
+	#   2F1R — Driver Monitor: TensorRT face detection + gaze estimation.
+	#   3F0R — Road Damage: TensorRT pothole segmentation on the road view.
+	if mono_forward:
+		aux_node_name = "road_damage"
+		aux_view = "road"
+		road_damage_node = Node(
+			package="visionconnect",
+			name="road_damage",
+			executable="road_damage",
+			output="screen",
+			parameters=[config.get("road_damage", {}).get("ros__parameters", {})],
+			remappings=[
+				("/road_damage/gps_in", "/imu_gps/gps/fix"),
+			]
+		)
+		ld.add_action(road_damage_node)
+	else:
+		aux_node_name = "driver_monitor"
+		aux_view = "driver"
 		driver_monitor_node = Node(
 			package="visionconnect",
 			name="driver_monitor",
@@ -301,6 +319,7 @@ def generate_launch_description():
 		name="dashboard",
 		executable="dashboard",
 		output="screen",
+		parameters=[{"aux_view": aux_view}],
 		remappings=[
 			# image_in / image_in_right feed the raw-camera stream. The
 			# dashboard subscribes to BOTH so the browser can toggle L/R
@@ -312,11 +331,11 @@ def generate_launch_description():
 			("/dashboard/lanes_in",  "/lanedet/lanes"),
 			("/dashboard/gui_in",    "/gui/fusion"),
 			("/dashboard/depth_in",  "/stereo_depth/depth_color"),
-			("/dashboard/driver_in", "/driver_monitor/image"),
+			("/dashboard/driver_in", f"/{aux_node_name}/image"),
 			("/dashboard/bev_in",    "/bev/image"),
 			("/dashboard/gps_in",    "/imu_gps/gps/fix"),
 			("/dashboard/imu_in",    "/imu_gps/imu/data"),
-			("/dashboard/dms_in",    "/driver_monitor/state"),
+			("/dashboard/dms_in",    f"/{aux_node_name}/state"),
 		]
 	)
 	ld.add_action(dashboard_node)

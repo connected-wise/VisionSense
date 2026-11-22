@@ -7,9 +7,11 @@ ui:
 # these for its rig; see README "Hardware variants".
 hardware:
     layout: "3F0R"      # "2F1R": stereo forward + mono camera facing the driver
-                        # "3F0R": stereo + mono camera all forward; 2D
-                        #         perception runs on the mono camera
-                        #         (/camera/raw), no driver monitor
+                        #         (driver monitor)
+                        # "3F0R": stereo + mono camera all forward, for fleet
+                        #         data collection; 2D perception and road
+                        #         damage (pothole) segmentation run on the
+                        #         mono camera (/camera/raw), no driver monitor
     # 3F0R only: mono camera intrinsics (same YAML format as
     # camera_stereo.calibration_file) for BEV. Empty = BEV built-in defaults.
     mono_calibration_file: ""
@@ -24,9 +26,13 @@ stereo:
 
 camera:
     ros__parameters:
-        resource:           "csi://0"   # CSI mono cam for driver monitor (IMX219 or IMX477 on CAM0)
+        resource:           "csi://0"   # CSI mono cam (IMX219 or IMX477 on CAM0)
         width:              1280
         height:             720
+        # Mount orientation. jetson-utils turns a CSI camera's image by 180
+        # degrees unless told otherwise, so "" suits a camera mounted the usual
+        # way and "rotate-180" one mounted upside down relative to that.
+        flip:               ""
 
 camera_stereo:
     ros__parameters:
@@ -145,6 +151,19 @@ adas:
         # main_eye change: drive a straight lane and watch
         # /adas/adas_alerts.current_lane_midpoint_x under good conditions.
         ref_center_x_normalized: 0.65
+
+# 3F0R only: pothole segmentation on the forward mono camera (YOLOv8s-seg).
+road_damage:
+    ros__parameters:
+        # Relative to share/visionconnect/graphs; absolute paths also work.
+        engine:         "road-damage/yolov8s-pothole-seg_fp16.engine"
+        camera_topic:   "/camera/raw"
+        labels:         "pothole"   # class names in model order, comma-separated
+        confidence:     0.4
+        # Each event appends a row (time, GPS position, count, confidence,
+        # area) to events.csv here and saves the annotated frame. "" = off.
+        log_dir:        "~/VisionSense_data/road_damage"
+        log_interval_s: 2.0         # at most one event this often
 
 driver_monitor:
     ros__parameters:
