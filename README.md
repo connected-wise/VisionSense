@@ -34,7 +34,8 @@ VisionSense is a comprehensive ROS2-based computer vision system designed for au
 | **Lane Detection** | Segment and detect lane lines | Neural Network + TensorRT |
 | **Traffic Sign Recognition** | Classify 50+ traffic sign types | YOLOv8 Classifier + TensorRT |
 | **Stereo Depth Estimation** | Dense depth maps from stereo camera | LightStereo-S + TensorRT |
-| **Driver Monitoring** | Face detection and gaze estimation | YOLOv11 + ResNet18 + TensorRT |
+| **Driver Monitoring** | Face detection and gaze estimation (2F1R) | YOLOv11 + ResNet18 + TensorRT |
+| **Road Damage** | Pothole segmentation with geotagged event log (3F0R) | YOLOv8s-seg + TensorRT |
 | **Data Fusion GUI** | Real-time visualization of all perception data | OpenCV + X11 |
 | **Web Dashboard** | Remote monitoring interface | HTTP Server |
 
@@ -112,7 +113,7 @@ Each supported rig has its own release branch, named
 | `VisionSense_Nano_2F1R` | Orin Nano | 2F1R | Tested (Orin Nano Super, JetPack 7.2.1) |
 | `VisionSense_Nano_3F0R` | Orin Nano | 3F0R | Tested on the bench; lane, ADAS and BEV tuning for a forward IMX477 still to do |
 | `VisionSense_NX_2F1R` | Orin NX | 2F1R | Tested (Orin NX 8GB Super, JetPack 7.2.1) |
-| `VisionSense_NX_3F0R` | Orin NX | 3F0R | Not yet tested on an Orin NX; same code as `VisionSense_NX_2F1R` with the 3F0R layout |
+| `VisionSense_NX_3F0R` | Orin NX | 3F0R | Tested on the bench (Orin NX 8GB Super, JetPack 7.2.1), road damage on sample footage only; lane, ADAS and BEV tuning for a forward IMX477 still to do |
 
 The layout says how many cameras face forward (F) and to the rear/cabin (R):
 
@@ -120,9 +121,14 @@ The layout says how many cameras face forward (F) and to the rear/cabin (R):
   CAM0 faces the driver. 2D perception (detection, signs, lanes, ADAS, BEV,
   fused view) runs on the stereo main eye, and the driver monitor runs on the
   mono camera.
-- **3F0R**: the stereo pair and the mono camera all face forward. 2D
-  perception runs on the mono camera (`/camera/raw`), the stereo pair only
-  produces depth, and there is no driver monitor. Set
+- **3F0R**: the stereo pair and the mono camera all face forward, for fleet
+  data collection. 2D perception runs on the mono camera (`/camera/raw`) and
+  the stereo pair only produces depth. In place of the driver monitor, the
+  mono camera feeds the [road damage node](#8-road-damage-node-road_damage),
+  which segments potholes and logs them with their GPS position; the
+  dashboard shows it as the **Road** view. The mono camera of the Orin NX rig
+  is mounted upside down, so `VisionSense_NX_3F0R` sets
+  `camera.flip: "rotate-180"`. Set
   `hardware.mono_calibration_file` to the mono camera's intrinsics for
   accurate BEV distances.
 
@@ -345,7 +351,52 @@ TensorRT-accelerated driver attention monitoring using face detection and gaze e
 
 ---
 
-### 8. ADAS Node (`adas`)
+### 8. Road Damage Node (`road_damage`)
+
+TensorRT-accelerated pothole segmentation on the forward mono camera. Runs in
+the 3F0R layout instead of the driver monitor.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `engine` | string | `road-damage/yolov8s-pothole-seg_fp16.engine` | Segmentation model |
+| `camera_topic` | string | `/camera/raw` | Input camera topic |
+| `labels` | string | `pothole` | Class names in model order, comma-separated |
+| `confidence` | float | 0.4 | Detection threshold |
+| `log_dir` | string | `~/VisionSense_data/road_damage` | Event log folder, empty to turn it off |
+| `log_interval_s` | float | 2.0 | Shortest time between two logged events |
+
+**Topics Subscribed:**
+- `/camera/raw` (`sensor_msgs/Image`) - Forward mono camera
+- `/imu_gps/gps/fix` (`sensor_msgs/NavSatFix`) - Position for the event log
+
+**Topics Published:**
+- `/road_damage/image` (`sensor_msgs/Image`) - Camera image with masks and boxes
+- `/road_damage/state` (`std_msgs/String`) - `CLEAR`, or a count such as `2 POTHOLES`
+- `/road_damage/alert` (`std_msgs/Bool`) - True while damage is in view
+
+**Event log:** while damage is in view, at most every `log_interval_s`
+seconds, the node appends a row to `events.csv` in `log_dir` (UTC time,
+latitude, longitude, altitude, count, label, highest confidence, mask area as
+% of the image, image file) and saves the annotated frame as a JPEG. The
+position columns stay empty without a GPS fix.
+
+**Model:** YOLOv8s-seg (640×640 input, one class, 32 mask prototypes at
+160×160) from [saadfrh/Pothole-Detection](https://github.com/saadfrh/Pothole-Detection),
+which reports mask mAP50 0.93 on its own validation set. Its training images
+are mostly close-up road photos, so expect to fine-tune it on frames from the
+fleet's own cameras. The node reads the class count and tensor sizes from the
+engine, so another YOLOv8-seg or YOLO11-seg export works with only the
+`engine` and `labels` parameters changed. The weights are Ultralytics-derived
+(AGPL-3.0).
+
+The repo holds only the ONNX file. Build the engine on the device with
+`bash scripts/regenerate_engines.sh road`, then rebuild the workspace. On an
+Orin NX 8GB the model alone takes about 7 ms per frame; inside the full 3F0R
+pipeline, which keeps the GPU fully loaded, the node runs at about 19 Hz.
+
+---
+
+### 9. ADAS Node (`adas`)
 
 Advanced Driver Assistance System alerts based on lane and detection data.
 
@@ -361,7 +412,7 @@ Advanced Driver Assistance System alerts based on lane and detection data.
 
 ---
 
-### 9. IMU/GPS Node (`imu_gps`)
+### 10. IMU/GPS Node (`imu_gps`)
 
 IMU data over I2C (bus 7) and GPS through gpsd. Supported boards:
 
@@ -386,7 +437,7 @@ The node picks whichever magnetometer answers.
 
 ---
 
-### 10. GUI Node (`gui`)
+### 11. GUI Node (`gui`)
 
 Real-time data fusion display with multi-panel layout.
 
@@ -418,7 +469,7 @@ Real-time data fusion display with multi-panel layout.
 
 ---
 
-### 11. Dashboard Node (`dashboard`)
+### 12. Dashboard Node (`dashboard`)
 
 Web-based monitoring interface accessible via browser.
 
@@ -428,6 +479,9 @@ Web-based monitoring interface accessible via browser.
 - Live video stream
 - Detection statistics
 - System status
+
+The third view and its status chip follow the layout: **Driver** (driver
+monitor state) in 2F1R, **Road** (road damage state) in 3F0R.
 
 Video goes to the browser over WebRTC as H.264. The dashboard uses the NVENC
 hardware encoder (`nvv4l2h264enc`) when the board has one and falls back to
@@ -460,7 +514,7 @@ VS_DRIVER_CAM=imx477 bash install_all_deps.sh # IMX477 on CAM0
 
 `VS_GPS_MODULE` picks the GPS/IMU board: `berrygps` (default) or `sara-r5`
 for the OzzMaker SARA-R5 LTE-M GPS + 10DOF, which also sets up the LTE-M
-data link (see [IMU/GPS Node](#9-imugps-node-imu_gps)). Set `VS_LTE_APN` to
+data link (see [IMU/GPS Node](#10-imugps-node-imu_gps)). Set `VS_LTE_APN` to
 the SIM's APN (`hologram` for the Hologram SIM that comes with the board).
 LTE-M is a low-rate link (tens of KB/s): fine for telemetry, slow for web
 browsing.
@@ -486,7 +540,7 @@ The `.engine` files checked into the repo were built on a JetPack 6.2
 Jetson (TensorRT 10.3). **They will not load on a different TensorRT version
 (e.g. JetPack 7.2) until rebuilt from their ONNX source.** Rebuild every
 engine the launch graph uses (detection, sign classifier, lanes, face, gaze,
-Fast-FoundationStereo) on the target device:
+road damage, Fast-FoundationStereo) on the target device:
 
 ```bash
 bash scripts/regenerate_engines.sh            # all engines (~15-25 min)
@@ -705,6 +759,7 @@ driver_monitor:
 | `lightstereo_s_320x512.engine` | Stereo Depth | 320×512 | TensorRT FP16, LightStereo-S (ICRA 2025) — 2D cost aggregation, ~16 ms compute |
 | `yolov11n_face_fp16.engine` | Face Detection | 640×640 | TensorRT FP16 |
 | `resnet18_gaze_fp16.engine` | Gaze Estimation | 448×448 | TensorRT FP16 |
+| `yolov8s-pothole-seg_fp16.engine` | Pothole Segmentation (3F0R) | 640×640 | TensorRT FP16 |
 
 ## ROS2 Topics Overview
 

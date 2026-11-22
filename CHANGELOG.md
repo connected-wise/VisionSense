@@ -32,6 +32,19 @@
   same page took over 4 minutes.
 - `imu_gps` reads the MMC5983MA magnetometer of the SARA-R5 board as well as
   the LIS3MDL of the BerryGPS-IMU.
+- Road damage node (`road_damage`) for the 3F0R layout, which is now the
+  fleet data collection variant: it segments potholes in the forward mono
+  camera image with a YOLOv8s-seg model
+  ([saadfrh/Pothole-Detection](https://github.com/saadfrh/Pothole-Detection),
+  AGPL-3.0 weights) and takes the driver monitor's place in the launch and
+  on the dashboard (**Road** view and state chip). Events are logged to
+  `~/VisionSense_data/road_damage` as a CSV row with the GPS position plus the
+  annotated frame. Build its engine with
+  `bash scripts/regenerate_engines.sh road`. Tested on the Orin NX 8GB with
+  sample pothole footage and with the live IMX477 (no false detections on a
+  bench scene); not yet tested on a road.
+- `camera.flip` in `config/config.yaml` for a mono camera mounted upside down
+  (`"rotate-180"`); `VisionSense_NX_3F0R` sets it.
 - Desktop launcher (`scripts/install_desktop_launcher.sh`, run by
   `install_all_deps.sh`): a **VisionSense** icon that runs
   `launch_visionsense.sh` in a terminal and opens the dashboard.
@@ -43,6 +56,9 @@
   `visionsense-imx219.service`. The boot service was a workaround for the
   IMX219, which cannot be reopened through Argus; the IMX477 can. IMX219
   installs are unchanged.
+
+- The dashboard's driver view is sent at 640x360 (was 640x480), the mono
+  camera's 16:9 shape.
 
 ### Fixed
 

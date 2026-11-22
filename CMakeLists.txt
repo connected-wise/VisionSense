@@ -128,6 +128,7 @@ target_compile_options(dashboard PRIVATE ${GST_CFLAGS_OTHER})
 add_executable(gui src/node_gui.cpp ${common_src})
 add_executable(adas src/node_adas.cpp ${common_src})
 add_executable(driver_monitor src/node_driver_monitor.cpp ${common_src})
+add_executable(road_damage src/node_road_damage.cpp ${common_src})
 add_executable(imu_gps src/node_imu_gps.cpp ${common_src})
 add_executable(bev src/node_bev.cpp ${common_src})
 add_executable(stereo_depth src/node_stereo_depth.cpp ${common_src})
@@ -214,6 +215,14 @@ target_link_libraries(adas
 )
 
 target_link_libraries(driver_monitor
+    ${catkin_LIBRARIES}
+    ${OpenCV_LIBRARIES}
+    common
+    nvinfer
+    cudart
+)
+
+target_link_libraries(road_damage
     ${catkin_LIBRARIES}
     ${OpenCV_LIBRARIES}
     common
@@ -372,6 +381,14 @@ ament_target_dependencies(bev
     OpenCV
 )
 
+ament_target_dependencies(road_damage
+    ament_index_cpp
+    rclcpp
+    sensor_msgs
+    std_msgs
+    OpenCV
+)
+
 ament_target_dependencies(imu_gps
     ament_index_cpp
     rclcpp
@@ -407,6 +424,7 @@ install(TARGETS gui DESTINATION lib/${PROJECT_NAME})
 install(TARGETS adas DESTINATION lib/${PROJECT_NAME})
 install(TARGETS bev DESTINATION lib/${PROJECT_NAME})
 install(TARGETS driver_monitor DESTINATION lib/${PROJECT_NAME})
+install(TARGETS road_damage DESTINATION lib/${PROJECT_NAME})
 install(TARGETS imu_gps DESTINATION lib/${PROJECT_NAME})
 install(TARGETS stereo_depth DESTINATION lib/${PROJECT_NAME})
 install(TARGETS stereo_depth_ffs DESTINATION lib/${PROJECT_NAME})

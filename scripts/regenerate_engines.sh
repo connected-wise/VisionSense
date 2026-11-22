@@ -13,6 +13,7 @@
 #   lane-detection/lane_detect.engine           ERFNet lane, FP16
 #   face-detection/yolov11n-facefp16.engine     YOLOv11n-face, FP16
 #   gaze-estimation/resnet18_gaze_fp16.engine   ResNet18 gaze, FP16, 448x448
+#   road-damage/yolov8s-pothole-seg_fp16.engine YOLOv8s-seg potholes, FP16, 640x640
 #   stereo-depth/fast_foundationstereo.engine   Fast-FoundationStereo 320x320,
 #                                               FP16 (ONNX kept under archive/)
 #
@@ -21,7 +22,7 @@
 #
 # Usage: bash scripts/regenerate_engines.sh [name ...]
 #   e.g. bash scripts/regenerate_engines.sh classify lane
-#   names: detect classify lane face gaze stereo (default: all)
+#   names: detect classify lane face gaze road stereo (default: all)
 
 set -euo pipefail
 
@@ -88,6 +89,10 @@ want lane && { build lane \
 want face && { build face \
     "$GRAPHS/face-detection/yolov11n-face.onnx" \
     "$GRAPHS/face-detection/yolov11n-facefp16.engine" || FAILED+=(face); }
+
+want road && { build road \
+    "$GRAPHS/road-damage/yolov8s-pothole-seg.onnx" \
+    "$GRAPHS/road-damage/yolov8s-pothole-seg_fp16.engine" || FAILED+=(road); }
 
 want gaze && { build gaze \
     "$GRAPHS/gaze-estimation/resnet18_gaze.onnx" \
