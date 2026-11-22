@@ -19,3 +19,6 @@ testing/rectified_samples/
 
 # Engine backups written by scripts/regenerate_engines.sh
 *.engine.prev.*
+
+# Built on each device by scripts/regenerate_engines.sh road
+src/graphs/road-damage/*.engine

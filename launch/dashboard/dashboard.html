@@ -526,7 +526,7 @@ footer {
     <span class="val" id="imuVal">ax — ay — az —</span>
   </span>
   <span class="chip dms" id="dmsChip">
-    <span class="label">DRIVER</span>
+    <span class="label" id="dmsLabel">DRIVER</span>
     <span class="val" id="dmsVal">—</span>
   </span>
   <span class="chip fps" id="fpsChip">
@@ -558,9 +558,9 @@ footer {
       <video autoplay muted playsinline></video>
       <span class="lbl"><span>Depth</span><span class="hz" data-hz="depth">—</span></span>
     </button>
-    <button class="thumb" data-stream="3" aria-label="Driver Monitor">
+    <button class="thumb" data-stream="3" id="auxThumb" aria-label="Driver Monitor">
       <video autoplay muted playsinline></video>
-      <span class="lbl"><span>Driver</span><span class="hz" data-hz="driver">—</span></span>
+      <span class="lbl"><span id="auxThumbLbl">Driver</span><span class="hz" data-hz="driver">—</span></span>
     </button>
     <button class="thumb" data-stream="4" aria-label="Bird's-Eye View">
       <video autoplay muted playsinline></video>
@@ -599,6 +599,9 @@ footer {
   const imuVal    = $("imuVal");
   const dmsChip   = $("dmsChip");
   const dmsVal    = $("dmsVal");
+  const dmsLabel  = $("dmsLabel");
+  const auxThumb  = $("auxThumb");
+  const auxThumbLbl = $("auxThumbLbl");
   const fpsVal    = $("fpsVal");
   const hzEls = {
     fused:  document.querySelector('[data-hz="fused"]'),
@@ -833,20 +836,43 @@ footer {
                      + ' <span class="sep">·</span> ay ' + f(m.ay)
                      + ' <span class="sep">·</span> az ' + f(m.az);
   }
+  // Stream 3 and its chip show whatever the mono camera is used for:
+  // "driver" (2F1R, driver monitor) or "road" (3F0R, road damage). The server
+  // reports which in every fps message, so a page opened at any time adapts.
+  const AUX_VIEWS = {
+    driver: { chip: "DRIVER", thumb: "Driver", title: "Driver Monitor", hz: "driver" },
+    road:   { chip: "ROAD",   thumb: "Road",   title: "Road Damage",    hz: "road" },
+  };
+  let auxView = "driver";
+  function setAuxView(name) {
+    if (!AUX_VIEWS[name] || name === auxView) return;
+    auxView = name;
+    const v = AUX_VIEWS[name];
+    dmsLabel.textContent = v.chip;
+    auxThumbLbl.textContent = v.thumb;
+    auxThumb.setAttribute("aria-label", v.title);
+    STREAM_LABELS[3] = v.title;
+    if (activeStream === 3) heroLabel.textContent = v.title;
+    dmsVal.textContent = "—";
+    dmsChip.classList.remove("ok", "warn", "bad");
+  }
   function onDriver(m) {
     const state = (m.state || "—").toString();
     dmsVal.textContent = state;
     dmsChip.classList.remove("ok", "warn", "bad");
-    if (state === "ALERT") dmsChip.classList.add("ok");
+    // Road damage states are "CLEAR" or a count such as "2 POTHOLES".
+    if (state === "ALERT" || state === "CLEAR") dmsChip.classList.add("ok");
     else if (state === "DISTRACTED") dmsChip.classList.add("warn");
-    else if (state === "DROWSY" || state === "NO_DRIVER") dmsChip.classList.add("bad");
+    else if (state === "DROWSY" || state === "NO_DRIVER"
+             || (auxView === "road" && state !== "—")) dmsChip.classList.add("bad");
   }
   function onFps(m) {
     const f = (v) => (v === undefined || v === null) ? "—" : String(v);
+    if (m.aux) setAuxView(m.aux);
     fpsVal.innerHTML =
         'fused ' + f(m.fused) + ' <span class="sep">·</span> '
       + 'depth ' + f(m.depth) + ' <span class="sep">·</span> '
-      + 'driver ' + f(m.driver) + ' <span class="sep">·</span> '
+      + AUX_VIEWS[auxView].hz + ' ' + f(m.driver) + ' <span class="sep">·</span> '
       + 'bev ' + f(m.bev);
     for (const k of Object.keys(hzEls)) {
       if (m[k] === undefined) continue;
@@ -961,8 +987,8 @@ footer {
       if (shuttingDown) return;
       const ok = confirm(
         "Shut down VisionSense?\n\n" +
-        "Every ROS node (cameras, detection, lanes, depth, driver " +
-        "monitor, GUI, dashboard) will stop gracefully. You'll need to " +
+        "Every ROS node (cameras, detection, lanes, depth, GUI, " +
+        "dashboard) will stop gracefully. You'll need to " +
         "run ./launch_visionsense.sh again to bring it back up."
       );
       if (!ok) return;

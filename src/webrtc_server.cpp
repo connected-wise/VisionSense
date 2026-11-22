@@ -34,7 +34,7 @@ constexpr StreamCaps kCaps[] = {
     {0,    0,   0,   0},   // 0 unused
     {1280, 720, 30,  2},   // 1 FUSED  — keyframe every ~0.5 s at 4 Hz
     {720,  450, 30,  10},  // 2 DEPTH
-    {640,  480, 30,  15},  // 3 DRIVER
+    {640,  360, 30,  15},  // 3 DRIVER (or road damage) — 16:9 like the mono camera
     {480,  360, 30,  5},   // 4 BEV
     {1280, 720, 30,  12},  // 5 CAMERA
     {640,  360, 30,  10},  // 6 LANES

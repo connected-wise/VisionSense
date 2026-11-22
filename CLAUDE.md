@@ -12,7 +12,7 @@ Hardware targets:
 
 Cameras: Arducam dual-AR0234 stereo (3840×1200 on CAM1, `/dev/video1` / `/dev/video-stereo`) + IMX219 or IMX477 mono CSI on CAM0 (driver-monitor, Argus `csi://0`). `install_all_deps.sh` takes `VS_DRIVER_CAM=imx219|imx477` to pick the overlay in `overlays/`. Code and scripts must work on both distros: never hardcode `humble`, `/home/jetson` or a CUDA version.
 
-Hardware variants live on release branches `VisionSense_<Nano|NX>_<2F1R|3F0R>` (see README "Hardware variants"). The code is shared; the branches differ only in defaults such as `hardware.layout` in `config/config.yaml`, which `launch/visionsense.launch.py` reads: in 3F0R the mono camera faces forward, 2D perception reads `/camera/raw`, and `driver_monitor` is not launched. Make fixes on the shared code and merge them into every variant branch.
+Hardware variants live on release branches `VisionSense_<Nano|NX>_<2F1R|3F0R>` (see README "Hardware variants"). The code is shared; the branches differ only in defaults such as `hardware.layout` in `config/config.yaml`, which `launch/visionsense.launch.py` reads: in 3F0R (fleet data collection) the mono camera faces forward, 2D perception reads `/camera/raw`, and `road_damage` (pothole segmentation) is launched instead of `driver_monitor`. `VisionSense_NX_3F0R` also sets `camera.flip: "rotate-180"` because that rig's mono camera is mounted upside down. Make fixes on the shared code and merge them into every variant branch.
 
 The dashboard process must not link jetson-utils: it links libsoup-2.4, and webrtcbin pulls in libsoup-3.0 on Ubuntu 24.04, which aborts the process when a browser opens a stream.
 
@@ -51,7 +51,8 @@ ros2 run visionconnect stereo_depth_lightstereo.py   # Python fallback (installe
 | `stereo_depth` | `src/node_stereo_depth.cpp` | LightStereo-S (TensorRT) — fused CUDA rectify+resize+norm+CHW preprocess in `src/cuda/stereo_rectify.cu`, two-input TRT inference, depth + colormap publish |
 | `adas` | `src/node_adas.cpp` | Lane-departure HUD overlay |
 | `bev` | `src/node_bev.cpp` | Bird's-eye view rasterization with IMU/GPS heading |
-| `driver_monitor` | `src/node_driver_monitor.cpp` | YOLOv11-face + ResNet18-gaze, alert states |
+| `driver_monitor` | `src/node_driver_monitor.cpp` | YOLOv11-face + ResNet18-gaze, alert states (2F1R) |
+| `road_damage` | `src/node_road_damage.cpp` | YOLOv8s-seg pothole segmentation on `/camera/raw`, state + geotagged event log (3F0R) |
 | `dashboard` | `src/node_dashboard.cpp` | Embedded HTTP + WebSocket server on `:8080` (libwebsockets). Sole web entry point — no rosbridge, no `python3 -m http.server` sidecar. |
 | `gui` | `src/node_gui.cpp` | Composite cv::imshow fusion view |
 | `imu_gps` | `src/node_imu_gps.cpp` | IMU/GPS publisher (gpsd + serial IMU) |
@@ -74,7 +75,9 @@ ros2 run visionconnect stereo_depth_lightstereo.py   # Python fallback (installe
 
 4. **DDS configuration is in the launch script, not the launch file.** `launch_visionsense.sh` sets `FASTDDS_BUILTIN_TRANSPORTS=LARGE_DATA`. Bypassing the script breaks one stereo eye to ~2 Hz.
 
-5. **The dashboard is `node_dashboard` itself** — it embeds libwebsockets and serves `launch/dashboard/dashboard.html` directly. Don't add a sidecar HTTP server.
+5. **Dashboard stream 3 and the `driver` state chip are shared by `driver_monitor` and `road_damage`.** The launch remaps `driver_in`/`dms_in` to whichever node the layout runs and sets the dashboard's `aux_view` parameter (`driver` or `road`); the node sends it in every `fps` message and `dashboard.html` relabels the view. The wire names stay `driver`.
+
+6. **The dashboard is `node_dashboard` itself** — it embeds libwebsockets and serves `launch/dashboard/dashboard.html` directly. Don't add a sidecar HTTP server.
 
 ## Key Files / Config
 
@@ -147,6 +150,7 @@ All are referenced from `CMakeLists.txt` `rosidl_generate_interfaces` block.
 
 - C++17, `-Ofast`, CUDA arch 87 (Orin).
 - No `cv::cuda::*` — write raw CUDA kernels in `src/cuda/`. The existing `stereo_rotate.cu`, `preprocess.cu`, and `stereo_rectify.cu` are the templates.
+- jetson-utils rotates CSI cameras by 180° by default and inverts the option: `camera.flip: ""` gives a `flip-method=2` pipeline, `"rotate-180"` gives the sensor's native orientation.
 - TRT engines are **not portable** across Jetson units / TRT versions. Regenerate from ONNX on the target device with `scripts/regenerate_engines.sh`, then rebuild (engines are installed into `share/` at build time).
 - C++ TRT pattern: deserialize → `setTensorAddress` → `cudaMallocAsync` GPU buffers → `cudaMemcpyAsync` H→D → `enqueueV3(stream)` → `cudaMemcpyAsync` D→H → `cudaStreamSynchronize`. See `src/node_driver_monitor.cpp` for the canonical example and `src/node_stereo_depth.cpp` for the two-input variant.
 - Don't add throttled logging — `ROS_WARN_THROTTLE` etc. are not defined in `ros_compat.h`. Gate with `(frame_count_ % N) == 0` instead.
