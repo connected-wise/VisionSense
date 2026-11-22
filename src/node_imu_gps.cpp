@@ -1,10 +1,12 @@
 /*
  * IMU-GPS Node for VisionSense
  *
- * Publishes IMU (accelerometer, gyroscope, magnetometer) and GPS data from BerryGPS-IMU v4
+ * Publishes IMU (accelerometer, gyroscope, magnetometer) and GPS data from the
+ * BerryGPS-IMU v4 or the OzzMaker SARA-R5 LTE-M GPS + 10DOF.
  * Hardware:
  * - LSM6DSL: Accelerometer + Gyroscope (I2C 0x6A)
- * - LIS3MDL: Magnetometer (I2C 0x1C)
+ * - Magnetometer: LIS3MDL (I2C 0x1C, BerryGPS-IMU) or MMC5983MA (I2C 0x30,
+ *   SARA-R5 board), whichever answers
  * - GPS: via gpsd (supports NMEA/UBX protocols transparently)
  *
  * Topics:
@@ -53,10 +55,22 @@ static constexpr int GPSD_MODE_2D = MODE_2D;
 #define LIS3MDL_CTRL_REG4   0x23
 #define LIS3MDL_OUT_X_L     0x28
 
+// MMC5983MA (Magnetometer) I2C addresses and registers
+#define MMC5983MA_ADDR      0x30
+#define MMC5983MA_XOUT0     0x00  // X/Y/Z [17:2], then XYZOUT2 with the low 2 bits
+#define MMC5983MA_CTRL0     0x09
+#define MMC5983MA_CTRL1     0x0A
+#define MMC5983MA_CTRL2     0x0B
+#define MMC5983MA_PROD_ID   0x2F
+
 // Sensor scaling factors
 #define ACCEL_SCALE         0.122 * 9.81 / 1000.0  // ±4g: 0.122 mg/LSB -> m/s²
 #define GYRO_SCALE          8.75 * M_PI / (180.0 * 1000.0)  // 245 dps: 8.75 mdps/LSB -> rad/s
 #define MAG_SCALE           1.0 / 6842.0 * 0.0001  // ±4 gauss: 6842 LSB/gauss -> Tesla
+#define MMC_SCALE           1.0 / 16384.0 * 0.0001  // 18-bit: 16384 LSB/gauss -> Tesla
+#define MMC_NULL            131072                  // 18-bit zero-field output
+
+enum class MagType { NONE, LIS3MDL, MMC5983MA };
 
 // Globals
 Publisher<sensor_msgs::msg::Imu> imu_pub = NULL;
@@ -128,8 +142,8 @@ bool init_lsm6dsl()
         return false;
     }
 
-    // Configure accelerometer: 104 Hz, ±4g
-    if (!i2c_write_byte(LSM6DSL_ADDR, LSM6DSL_CTRL1_XL, 0x40)) {
+    // Configure accelerometer: 104 Hz, ±4g (FS_XL = 10)
+    if (!i2c_write_byte(LSM6DSL_ADDR, LSM6DSL_CTRL1_XL, 0x48)) {
         ROS_ERROR("Failed to configure LSM6DSL accelerometer");
         return false;
     }
@@ -150,7 +164,6 @@ bool init_lis3mdl()
     // Check WHO_AM_I
     uint8_t who_am_i = i2c_read_byte(LIS3MDL_ADDR, LIS3MDL_WHO_AM_I);
     if (who_am_i != 0x3D) {
-        ROS_WARN("LIS3MDL not found (WHO_AM_I = 0x%02X), magnetometer disabled", who_am_i);
         return false;
     }
 
@@ -168,6 +181,44 @@ bool init_lis3mdl()
 
     ROS_INFO("LIS3MDL initialized (Magnetometer)");
     return true;
+}
+
+// Initialize MMC5983MA (Magnetometer)
+bool init_mmc5983ma()
+{
+    uint8_t prod_id = i2c_read_byte(MMC5983MA_ADDR, MMC5983MA_PROD_ID);
+    if (prod_id != 0x30) {
+        return false;
+    }
+
+    // SET pulse to restore the sensor's magnetization, then wait for it
+    i2c_write_byte(MMC5983MA_ADDR, MMC5983MA_CTRL0, 0x08);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    // Configure: 100 Hz bandwidth
+    i2c_write_byte(MMC5983MA_ADDR, MMC5983MA_CTRL1, 0x00);
+
+    // Configure: automatic SET/RESET
+    i2c_write_byte(MMC5983MA_ADDR, MMC5983MA_CTRL0, 0x20);
+
+    // Configure: continuous mode at 50 Hz, periodic SET every 100 measurements
+    i2c_write_byte(MMC5983MA_ADDR, MMC5983MA_CTRL2, 0xBC);
+
+    ROS_INFO("MMC5983MA initialized (Magnetometer)");
+    return true;
+}
+
+// Initialize whichever magnetometer is fitted
+MagType init_magnetometer()
+{
+    if (init_lis3mdl()) {
+        return MagType::LIS3MDL;
+    }
+    if (init_mmc5983ma()) {
+        return MagType::MMC5983MA;
+    }
+    ROS_WARN("No magnetometer found (LIS3MDL or MMC5983MA), magnetometer disabled");
+    return MagType::NONE;
 }
 
 // Read accelerometer data
@@ -227,6 +278,34 @@ void read_gyroscope(double& gx, double& gy, double& gz)
     gx = raw_x * GYRO_SCALE;
     gy = raw_y * GYRO_SCALE;
     gz = raw_z * GYRO_SCALE;
+}
+
+// Read MMC5983MA magnetometer data
+void read_mmc5983ma(double& mx, double& my, double& mz)
+{
+    if (ioctl(i2c_fd, I2C_SLAVE, MMC5983MA_ADDR) < 0) {
+        return;
+    }
+
+    uint8_t reg = MMC5983MA_XOUT0;
+    if (write(i2c_fd, &reg, 1) != 1) {
+        return;
+    }
+
+    uint8_t data[7];
+    if (read(i2c_fd, data, 7) != 7) {
+        return;
+    }
+
+    // 18-bit unsigned, offset by MMC_NULL: [17:10] [9:2] from the axis
+    // registers, [1:0] from XYZOUT2
+    int32_t raw_x = (data[0] << 10) | (data[1] << 2) | ((data[6] >> 6) & 0x3);
+    int32_t raw_y = (data[2] << 10) | (data[3] << 2) | ((data[6] >> 4) & 0x3);
+    int32_t raw_z = (data[4] << 10) | (data[5] << 2) | ((data[6] >> 2) & 0x3);
+
+    mx = (raw_x - MMC_NULL) * MMC_SCALE;
+    my = (raw_y - MMC_NULL) * MMC_SCALE;
+    mz = (raw_z - MMC_NULL) * MMC_SCALE;
 }
 
 // Read magnetometer data
@@ -308,7 +387,7 @@ void read_gps()
 }
 
 // Global state for publish loop
-bool mag_available = false;
+MagType mag_type = MagType::NONE;
 bool imu_available_global = false;
 
 // Publish callback
@@ -356,9 +435,13 @@ void publish_sensors()
     imu_pub->publish(imu_msg);
 
     // Read and publish magnetometer if available
-    if (mag_available) {
-        double mx, my, mz;
-        read_magnetometer(mx, my, mz);
+    if (mag_type != MagType::NONE) {
+        double mx = 0, my = 0, mz = 0;
+        if (mag_type == MagType::MMC5983MA) {
+            read_mmc5983ma(mx, my, mz);
+        } else {
+            read_magnetometer(mx, my, mz);
+        }
 
         sensor_msgs::msg::MagneticField mag_msg;
         mag_msg.header.stamp = imu_msg.header.stamp;
@@ -440,7 +523,7 @@ int main(int argc, char** argv)
         ROS_WARN("LSM6DSL not available - will publish zero IMU values");
     }
 
-    mag_available = init_lis3mdl();  // Magnetometer is optional
+    mag_type = init_magnetometer();  // Magnetometer is optional
 
     // Initialize GPS via gpsd
     gps_available = init_gps(gpsd_host, gpsd_port);

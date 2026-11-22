@@ -1,0 +1,20 @@
+[Unit]
+Description=SARA-R5 LTE-M/GNSS serial multiplexer (CMUX on /dev/ttyTHS1)
+After=dev-ttyTHS1.device
+BindsTo=dev-ttyTHS1.device
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/sara-r5
+ExecStartPre=/sbin/modprobe n_gsm
+ExecStart=/usr/local/bin/sara-r5-mux /dev/ttyTHS1 115200
+# Becomes active only once the modem answers on the mux and GNSS is running,
+# so gpsd and PPP (ordered after this unit) find their channels ready.
+ExecStartPost=/usr/local/bin/sara-r5-start
+# Registering on the preferred operator can take minutes
+TimeoutStartSec=300
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

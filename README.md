@@ -363,10 +363,24 @@ Advanced Driver Assistance System alerts based on lane and detection data.
 
 ### 9. IMU/GPS Node (`imu_gps`)
 
-Sensor fusion for IMU and GPS data (BNO055 + GPS module).
+IMU data over I2C (bus 7) and GPS through gpsd. Supported boards:
+
+- **BerryGPS-IMU v4**: LSM6DSL accel/gyro (0x6A), LIS3MDL magnetometer (0x1C),
+  GPS on `/dev/ttyTHS1`.
+- **OzzMaker SARA-R5 LTE-M GPS + 10DOF**: LSM6DSL (0x6A), MMC5983MA
+  magnetometer (0x30), BMP388 barometer (0x77, not read yet). GPS and the
+  LTE-M modem share `/dev/ttyTHS1` through a CMUX multiplexer: AT commands on
+  `/dev/gsmtty1`, PPP on `/dev/gsmtty2`, GNSS on `/dev/gsmtty4` for gpsd.
+  The PPP link is the NetworkManager connection **LTE** (`ppp0`, in the
+  network menu), used when Wi-Fi and Ethernet are down. Set up by
+  `scripts/sara-r5/install_sara_r5.sh` (service `sara-r5-mux`; NetworkManager
+  starts `sara-r5-ppp`).
+
+The node picks whichever magnetometer answers.
 
 **Topics Published:**
-- `/imu_gps/imu/data` (`sensor_msgs/Imu`) - IMU orientation and acceleration
+- `/imu_gps/imu/data` (`sensor_msgs/Imu`) - acceleration (±4 g) and angular rate
+- `/imu_gps/imu/mag` (`sensor_msgs/MagneticField`) - magnetic field (uncalibrated)
 - `/imu_gps/gps/fix` (`sensor_msgs/NavSatFix`) - GPS coordinates
 
 ---
@@ -444,6 +458,13 @@ VS_DRIVER_CAM=imx477 bash install_all_deps.sh # IMX477 on CAM0
 ```
 
 This script installs:
+`VS_GPS_MODULE` picks the GPS/IMU board: `berrygps` (default) or `sara-r5`
+for the OzzMaker SARA-R5 LTE-M GPS + 10DOF, which also sets up the LTE-M
+data link (see [IMU/GPS Node](#9-imugps-node-imu_gps)). Set `VS_LTE_APN` to
+the SIM's APN (`hologram` for the Hologram SIM that comes with the board).
+LTE-M is a low-rate link (tens of KB/s): fine for telemetry, slow for web
+browsing.
+
 - ROS2 desktop and vision packages for the detected distro
 - Build tools (cmake, colcon, etc.)
 - jetson-inference library

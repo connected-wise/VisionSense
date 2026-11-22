@@ -1,0 +1,42 @@
+#!/bin/sh
+# NetworkManager device handler for the "LTE" generic connection
+# (generic.device-handler=sara-r5), installed as
+# /etc/NetworkManager/dispatcher.d/device/sara-r5.
+#
+# device-add brings up PPP over the SARA-R5 mux and returns ppp0's ifindex;
+# NetworkManager then owns the connection (address, route, DNS) and shows it
+# in the network menu. device-delete takes PPP down.
+#
+# The LTE connection sets the address statically: the SARA-R5 always hands
+# out 192.168.201.1 with peer 192.168.201.2 over PPP (it NATs to the network).
+PPP_ADDR=192.168.201.1
+
+case "$2" in
+device-add)
+    for i in $(seq 1 60); do
+        # pppd exits if the PPP channel is not up yet: start it (again)
+        if ! systemctl -q is-active sara-r5-ppp.service; then
+            systemctl reset-failed sara-r5-ppp.service 2>/dev/null
+            systemctl start sara-r5-ppp.service
+        fi
+        addr=$(ip -4 -o addr show dev ppp0 2>/dev/null | awk '{print $4; exit}')
+        if [ -n "$addr" ]; then
+            if [ "$addr" != "$PPP_ADDR" ]; then
+                systemctl stop sara-r5-ppp.service
+                echo "ERROR=PPP address is $addr, the LTE connection expects $PPP_ADDR"
+                exit 1
+            fi
+            echo "IFINDEX=$(cat /sys/class/net/ppp0/ifindex)"
+            exit 0
+        fi
+        sleep 1
+    done
+    systemctl stop sara-r5-ppp.service
+    echo "ERROR=no PPP link on the SARA-R5"
+    exit 1
+    ;;
+device-delete)
+    systemctl stop sara-r5-ppp.service
+    ;;
+esac
+exit 0

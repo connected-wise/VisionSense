@@ -6,6 +6,11 @@
 # The driver-monitor camera on CAM0 picks the device-tree overlay:
 #   VS_DRIVER_CAM=imx219 (default) or VS_DRIVER_CAM=imx477, e.g.
 #   VS_DRIVER_CAM=imx477 bash install_all_deps.sh
+#
+# The GPS/IMU board picks the GPS setup:
+#   VS_GPS_MODULE=berrygps (default): BerryGPS-IMU, GPS on /dev/ttyTHS1
+#   VS_GPS_MODULE=sara-r5: OzzMaker SARA-R5 LTE-M GPS + 10DOF, GPS and LTE
+#   multiplexed on /dev/ttyTHS1 (see scripts/sara-r5/install_sara_r5.sh)
 
 set -e  # Exit on error
 
@@ -40,6 +45,16 @@ case "$VS_DRIVER_CAM" in
         ;;
 esac
 echo "Driver-monitor camera on CAM0: $VS_DRIVER_CAM"
+
+VS_GPS_MODULE="${VS_GPS_MODULE:-berrygps}"
+case "$VS_GPS_MODULE" in
+    berrygps|sara-r5) ;;
+    *)
+        echo "VS_GPS_MODULE must be berrygps or sara-r5 (got '$VS_GPS_MODULE')"
+        exit 1
+        ;;
+esac
+echo "GPS/IMU board: $VS_GPS_MODULE"
 
 # Check if running on Jetson
 if [ ! -f /etc/nv_tegra_release ]; then
@@ -166,7 +181,11 @@ else
 fi
 
 echo -e "\n9. Configuring gpsd for GPS module..."
-if [ -f /etc/default/gpsd ]; then
+if [ "$VS_GPS_MODULE" = "sara-r5" ]; then
+    # GPS sits inside the LTE modem; the UART is multiplexed, so gpsd reads
+    # the GNSS channel and must not open /dev/ttyTHS1 itself.
+    bash "${SCRIPT_DIR}/scripts/sara-r5/install_sara_r5.sh"
+elif [ -f /etc/default/gpsd ]; then
     # Configure gpsd to use the Jetson UART connected to GPS module
     if ! grep -q "ttyTHS1" /etc/default/gpsd; then
         echo "Configuring gpsd for /dev/ttyTHS1..."

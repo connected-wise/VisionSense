@@ -16,8 +16,27 @@
   `/etc/nvpmodel.conf` linked to `nvpmodel_p3767_0001_super.conf`; reflashing
   QSPI alone leaves both set for the Nano.
 
+### Added
+
+- OzzMaker SARA-R5 LTE-M GPS + 10DOF support (`VS_GPS_MODULE=sara-r5`,
+  `scripts/sara-r5/`). The modem and its GNSS share the 40-pin UART through
+  CMUX: `sara-r5-mux` builds on the `n_gsm` line discipline, which JetPack 7.2
+  does not ship, so `build_n_gsm.sh` builds it from kernel.org for the running
+  kernel. PPP gives an LTE-M link, owned by the NetworkManager connection
+  "LTE" so it shows in the network menu and takes over when Wi-Fi and
+  Ethernet are down; gpsd reads the GNSS channel. Tested with Wi-Fi off:
+  NetworkManager reports full connectivity and DNS, ping and HTTPS work
+  over LTE-M while GNSS streams. With a Hologram SIM (APN `hologram`,
+  roaming on Verizon LTE-M) a 520 KB web page loads in about 50 s. A Tello
+  (T-Mobile) SIM also works, but the network caps it at 198 kbit/s and the
+  same page took over 4 minutes.
+- `imu_gps` reads the MMC5983MA magnetometer of the SARA-R5 board as well as
+  the LIS3MDL of the BerryGPS-IMU.
+
 ### Fixed
 
+- `imu_gps` reported twice the real acceleration: the LSM6DSL was set to ±2 g
+  but scaled as ±4 g. It is now set to ±4 g.
 - Stereo frames green below the top, with every frame failing its payload
   CRC: the combined overlays set the AR0234 `pix_clk_hz` to 154 MHz, from
   which the driver clocked NVCSI at 39 MHz, too slow for 3840x1200 UYVY, so
