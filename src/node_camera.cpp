@@ -206,6 +206,13 @@ int main(int argc, char **argv)
 	}
 
 	// start publishing video frames
+	// Argus sometimes aborts a capture session for good ("CaptureAborted",
+	// seen with the IMX477 a few minutes into a run): every Capture() then
+	// times out although the stream still counts as open. A new session works,
+	// so give up after a few timeouts and let the launch file respawn the node.
+	const int max_failed_captures = 3;
+	int failed_captures = 0;
+
 	while( ROS_OK() )
 	{
 		if( !aquireFrame() )
@@ -215,7 +222,14 @@ int main(int argc, char **argv)
 				ROS_INFO("stream is closed or reached EOS, exiting node...");
 				break;
 			}
+			if( ++failed_captures >= max_failed_captures )
+			{
+				ROS_ERROR("%d captures in a row failed, exiting node so it can be restarted", failed_captures);
+				break;
+			}
 		}
+		else
+			failed_captures = 0;
 		if( ROS_OK() )
 			ROS_SPIN_ONCE();
 	}
