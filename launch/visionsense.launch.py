@@ -117,6 +117,10 @@ def generate_launch_description():
 			output="screen",
 			parameters=[config["camera"]["ros__parameters"]],
 			prefix="env -u DISPLAY -u XAUTHORITY -u WAYLAND_DISPLAY",
+			# The node exits when Argus stops delivering frames; a new
+			# session recovers it.
+			respawn=True,
+			respawn_delay=3.0,
 		)
 		ld.add_action(camera_node)
 
