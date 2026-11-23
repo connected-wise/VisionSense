@@ -68,6 +68,13 @@
   `camera_stereo.baseline_mm` (a fallback; depth takes the baseline from the
   calibration file) and the sanity check of `compute_stereo_calib.py`
   (`--baseline-mm`). `capture_stereo_calib.py` opens `/dev/video-stereo`.
+- `road_damage` segments 5 frames per second by default (`max_rate_hz`)
+  instead of every camera frame. On the Orin NX 8GB the GPU is saturated by
+  the full pipeline, and at full rate this node raised stereo depth's
+  inference time from about 70 ms to about 107 ms per frame (35 ms with the
+  GPU to itself).
+- `stereo_depth_ffs` has an `enable_timing` parameter that logs the time
+  spent per stage and the age of its input.
 - The dashboard's driver view is sent at 640x360 (was 640x480), the mono
   camera's 16:9 shape.
 

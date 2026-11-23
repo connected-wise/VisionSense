@@ -136,12 +136,14 @@ public:
         declare_parameter("warmup_iters",          3);
         declare_parameter("sync_slop_s",           0.05);
         declare_parameter("depth_color_publish_w", 480);
+        declare_parameter("enable_timing",         false);
 
         const std::string engine_path = get_parameter("engine_file_path").as_string();
         const std::string calib_path  = get_parameter("calibration_file").as_string();
         depth_vmax_  = get_parameter("depth_vmax").as_double();
         int warmup   = get_parameter("warmup_iters").as_int();
         slop_ns_     = static_cast<int64_t>(get_parameter("sync_slop_s").as_double() * 1e9);
+        enable_timing_ = get_parameter("enable_timing").as_bool();
         color_w_req_ = get_parameter("depth_color_publish_w").as_int();
 
         if (engine_path.empty() || !std::ifstream(engine_path).good())
@@ -399,6 +401,7 @@ private:
                   int order_l, int order_r)
     {
         const size_t raw_bytes = static_cast<size_t>(eye_w_) * eye_h_ * sizeof(uchar3);
+        const double t0 = enable_timing_ ? nowMs() : 0.0;
 
         // Host → device upload for both eyes (no intermediate cv::Mat needed —
         // the message data is already tightly packed uchar3 for rgb8/bgr8 with
@@ -435,6 +438,8 @@ private:
                         cudaMemcpyDeviceToHost, stream_);
         cudaStreamSynchronize(stream_);
 
+        const double t1 = enable_timing_ ? nowMs() : 0.0;
+
         // Build a model-resolution Mat over the host buffer.
         cv::Mat disp_model(model_h_, model_w_, CV_32F, host_disp_.data());
 
@@ -459,6 +464,7 @@ private:
         }
         depth_msg_.header.stamp = left_msg->header.stamp;
         depth_pub_->publish(depth_msg_);
+        const double t2 = enable_timing_ ? nowMs() : 0.0;
 
         // Color viz at a downsized resolution.
         cv::Mat disp_small;
@@ -499,6 +505,26 @@ private:
         if ((++frame_count_ % 30) == 0) {
             ROS_INFO("stereo_depth: %d frames published", frame_count_);
         }
+
+        if (enable_timing_) {
+            const double t3 = nowMs();
+            // Age of the frame when it reached this node (capture + transport
+            // + waiting behind the previous frame)
+            const double stamp_ms =
+                left_msg->header.stamp.sec * 1e3 + left_msg->header.stamp.nanosec / 1e6;
+            timing_wait_  += get_clock()->now().nanoseconds() / 1e6 - stamp_ms - (t3 - t0);
+            timing_infer_ += t1 - t0;
+            timing_depth_ += t2 - t1;
+            timing_color_ += t3 - t2;
+            if ((frame_count_ % 30) == 0) {
+                ROS_INFO("stereo_depth timing (avg ms): input age=%.1f upload+rectify+infer=%.1f "
+                         "depth+publish=%.1f color+publish=%.1f total=%.1f",
+                         timing_wait_ / 30, timing_infer_ / 30, timing_depth_ / 30,
+                         timing_color_ / 30,
+                         (timing_infer_ + timing_depth_ + timing_color_) / 30);
+                timing_wait_ = timing_infer_ = timing_depth_ = timing_color_ = 0.0;
+            }
+        }
     }
 
 private:
@@ -531,6 +557,13 @@ private:
     int    color_w_req_ = 480;
     int    color_pub_w_ = 0, color_pub_h_ = 0;
     int    frame_count_ = 0;
+    bool   enable_timing_ = false;
+    double timing_wait_ = 0.0, timing_infer_ = 0.0, timing_depth_ = 0.0, timing_color_ = 0.0;
+
+    static double nowMs() {
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
     double depth_vmax_  = 20.0;
     int64_t slop_ns_    = 50'000'000;
 

@@ -308,11 +308,17 @@ std::unique_ptr<DamageSegmenter> segmenter;
 // Class names, in model order ("pothole" for the default model)
 std::vector<std::string> labels;
 
-// The state stays raised for a few frames after the last detection so a
+// The state stays raised for a moment after the last detection so a
 // pothole passing through the image does not flicker on the dashboard.
-int frames_since_damage = 1000000;
+double last_damage_ms = -1e12;
 int last_count = 0;
-const int HOLD_FRAMES = 15;  // ~0.5 second at 30fps
+const double HOLD_MS = 1000.0;
+
+// Frames are skipped to keep to max_rate_hz. Segmenting every camera frame
+// is not needed to find potholes, and the GPU is shared: at the camera's full
+// rate this node alone made stereo depth about 50% slower on an Orin NX.
+double max_rate_hz = 5.0;
+double last_frame_ms = -1e12;
 
 // Event log: one CSV row and one annotated JPEG per event
 std::string log_dir;
@@ -444,7 +450,11 @@ void logEvent(const cv::Mat& annotated_rgb, const std::vector<Damage>& found) {
 
 void image_callback(const sensor_msgs::Image::SharedPtr msg) {
     double t0 = 0, t1 = 0, t2 = 0;
-    if (enable_timing) t0 = rd_get_time_ms();
+    const double now_ms = rd_get_time_ms();
+    // 10% slack so a frame that arrives a little early is not skipped
+    if (max_rate_hz > 0 && now_ms - last_frame_ms < 900.0 / max_rate_hz) return;
+    last_frame_ms = now_ms;
+    if (enable_timing) t0 = now_ms;
 
     // The model wants RGB, which is what the camera publishes; the annotated
     // copy stays RGB too, so there is no color conversion on the hot path.
@@ -479,13 +489,11 @@ void image_callback(const sensor_msgs::Image::SharedPtr msg) {
     if (enable_timing) t1 = rd_get_time_ms();
 
     if (!found.empty()) {
-        frames_since_damage = 0;
+        last_damage_ms = now_ms;
         last_count = (int)found.size();
         drawDamage(output, found, mask);
-    } else if (frames_since_damage < 1000000) {
-        frames_since_damage++;
     }
-    int count = (frames_since_damage <= HOLD_FRAMES) ? last_count : 0;
+    int count = (now_ms - last_damage_ms <= HOLD_MS) ? last_count : 0;
     std::string state = stateName(found, count);
 
     // Draw state
@@ -551,6 +559,7 @@ int main(int argc, char** argv) {
     ROS_DECLARE_PARAMETER("camera_topic", camera_topic);
     ROS_DECLARE_PARAMETER("labels", labels_str);
     ROS_DECLARE_PARAMETER("confidence", conf_thresh);
+    ROS_DECLARE_PARAMETER("max_rate_hz", max_rate_hz);
     ROS_DECLARE_PARAMETER("log_dir", log_dir);
     ROS_DECLARE_PARAMETER("log_interval_s", log_interval_s);
     ROS_DECLARE_PARAMETER("enable_timing", enable_timing);
@@ -559,6 +568,7 @@ int main(int argc, char** argv) {
     ROS_GET_PARAMETER("camera_topic", camera_topic);
     ROS_GET_PARAMETER("labels", labels_str);
     ROS_GET_PARAMETER("confidence", conf_thresh);
+    ROS_GET_PARAMETER("max_rate_hz", max_rate_hz);
     ROS_GET_PARAMETER("log_dir", log_dir);
     ROS_GET_PARAMETER("log_interval_s", log_interval_s);
     ROS_GET_PARAMETER("enable_timing", enable_timing);
@@ -630,7 +640,8 @@ int main(int argc, char** argv) {
     auto gps_sub = node->create_subscription<sensor_msgs::msg::NavSatFix>(
         "gps_in", 10, gps_callback);
 
-    ROS_INFO("Road damage segmentation ready (timing: %s)", enable_timing ? "enabled" : "disabled");
+    ROS_INFO("Road damage segmentation ready (at most %.1f Hz, timing: %s)",
+             max_rate_hz, enable_timing ? "enabled" : "disabled");
 
     ROS_SPIN();
 

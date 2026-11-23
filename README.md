@@ -373,6 +373,7 @@ the 3F0R layout instead of the driver monitor.
 | `camera_topic` | string | `/camera/raw` | Input camera topic |
 | `labels` | string | `pothole` | Class names in model order, comma-separated |
 | `confidence` | float | 0.4 | Detection threshold |
+| `max_rate_hz` | float | 5.0 | Frames per second to segment, 0 for every camera frame |
 | `log_dir` | string | `~/VisionSense_data/road_damage` | Event log folder, empty to turn it off |
 | `log_interval_s` | float | 2.0 | Shortest time between two logged events |
 
@@ -402,8 +403,10 @@ engine, so another YOLOv8-seg or YOLO11-seg export works with only the
 
 The repo holds only the ONNX file. Build the engine on the device with
 `bash scripts/regenerate_engines.sh road`, then rebuild the workspace. On an
-Orin NX 8GB the model alone takes about 7 ms per frame; inside the full 3F0R
-pipeline, which keeps the GPU fully loaded, the node runs at 13 to 19 Hz.
+Orin NX 8GB the model alone takes about 7 ms per frame. The node segments
+5 frames per second by default (`max_rate_hz`): every GPU node slows the
+others down, and at the camera's full rate this one made stereo depth about
+50% slower.
 
 ---
 

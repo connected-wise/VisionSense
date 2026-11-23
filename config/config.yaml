@@ -169,6 +169,10 @@ road_damage:
         camera_topic:   "/camera/raw"
         labels:         "pothole"   # class names in model order, comma-separated
         confidence:     0.4
+        # Frames per second to segment (0 = every camera frame). The GPU is
+        # shared with stereo depth, detection and lanes; at the camera's full
+        # rate this node alone slows depth by about half.
+        max_rate_hz:    5.0
         # Each event appends a row (time, GPS position, count, confidence,
         # area) to events.csv here and saves the annotated frame. "" = off.
         log_dir:        "~/VisionSense_data/road_damage"
