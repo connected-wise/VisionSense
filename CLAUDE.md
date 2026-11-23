@@ -93,7 +93,7 @@ ros2 run visionconnect stereo_depth_lightstereo.py   # Python fallback (installe
 When the cameras are bumped / re-seated / swapped, regenerate `config/stereo_calib.yaml`:
 
 ```bash
-# 1. Free /dev/video1 (only one process can hold it). Stop VisionSense.
+# 1. Free the stereo camera (only one process can hold it). Stop VisionSense.
 cd scripts
 python3 capture_stereo_calib.py          # SPACE to save; saves only when both eyes detect
                                           # Defaults: 7x5 inner corners, 30 mm squares, rotate-180
@@ -107,10 +107,12 @@ python3 compute_stereo_calib.py \
 # --reject-threshold 1.5 px)
 ```
 
+To check whether the current `config/stereo_calib.yaml` still fits the camera (after a bump, a re-seat, or new hardware), run `python3 scripts/check_stereo_calib.py` while VisionSense is running. It rectifies a live pair and measures the vertical offset of matched features; more than about 1 px means recalibrate. Depth takes its baseline from the calibration file (`P2`), so `camera_stereo.baseline_mm` in `config.yaml` matters only without a calibration file. FFS does not make calibration optional: it matches along rows of the rectified pair.
+
 Expected calibration quality:
 - per-eye RMS < 0.5 px
 - stereo RMS < 1.0 px
-- ||T|| ≈ 100 mm (matches Arducam baseline)
+- ||T|| ≈ the physical lens spacing (95 mm on the current pair; pass `--baseline-mm` to `compute_stereo_calib.py` if it differs)
 - |Tx| >> |Ty|, |Tz|
 
 If `|Tz|` ends up large (the optimizer attributing residual error to phantom Z baseline), the `stereoRectify` zoom factor explodes and the visible FOV shrinks. The fallback is to manually set `Ty=Tz=0` in the YAML and re-run `stereoRectify` — see the workflow at the bottom of the comment block at the top of `config/stereo_calib.yaml`.

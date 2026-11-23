@@ -618,10 +618,10 @@ If one eye lags behind the other, in this order:
 
 ### Step 1 — Capture pairs
 
-The capture script reads `/dev/video1` directly (bypassing ROS) and saves byte-identical L/R PNGs at the same per-eye geometry that `camera_stereo` publishes (1440×900 default, inner-edge crop, rotate-180 for the upside-down mount).
+The capture script reads the stereo camera (`/dev/video-stereo`) directly (bypassing ROS) and saves byte-identical L/R PNGs at the same per-eye geometry that `camera_stereo` publishes (1440×900 default, inner-edge crop, rotate-180 for the upside-down mount).
 
 ```bash
-# Stop VisionSense first — only one process can hold /dev/video1.
+# Stop VisionSense first — only one process can hold the stereo camera.
 sudo systemctl stop visionsense-imx219.service   # IMX219 rigs only: the mono camera runs from here
 # Then either fully stop VisionSense or just kill camera_stereo before capture.
 
@@ -654,7 +654,7 @@ The script does per-eye intrinsic calibration, iteratively drops pairs whose per
 Good output:
 - `left RMS < 0.5 px`, `right RMS < 0.5 px`
 - `stereo RMS < 1.0 px`
-- `||T|| ≈ 100 mm` (matches Arducam baseline)
+- `||T||` ≈ the physical lens spacing (95 mm on the current pair; `--baseline-mm` sets what the script compares against)
 - `|Tx| >> |Ty|, |Tz|` (lenses on the same horizontal line, coplanar in Z)
 
 ### Step 3 — Sanity-check rectification
@@ -680,12 +680,30 @@ for i in (0,40,80):
 "
 ```
 
+### Step 4 — Check a calibration against the camera
+
+```bash
+# With VisionSense running and the cameras looking at a textured scene
+python3 scripts/check_stereo_calib.py --save /tmp/rectified.jpg
+```
+
+The script rectifies one live pair with `config/stereo_calib.yaml` and
+measures the vertical offset of matched features between the eyes. A fitting
+calibration gives a median within ±0.5 px and a mean below 1 px. Run it after
+recalibrating, and whenever the cameras are bumped, re-seated or replaced.
+
+Depth needs a calibration that fits: the stereo network (Fast-FoundationStereo)
+matches along the rows of the rectified pair, and metric depth is
+`fx · baseline / disparity` with both taken from the calibration file. The
+`baseline_mm` value in `config.yaml` is only a fallback for running without a
+calibration file.
+
 ### Common failure modes
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Rectified sample is all black/white, `fx_rect > 100k` | Optimizer found bogus (R, T) — usually from low pose diversity | Recapture with varied depth and angle |
-| `||T||` doesn't match physical baseline (~100 mm) | Wrong `--square-mm` value, or board held at one constant depth | Measure squares with a ruler; recapture at varied depths |
+| `||T||` doesn't match the physical baseline (95 mm) | Wrong `--square-mm` value, or board held at one constant depth | Measure squares with a ruler; recapture at varied depths |
 | `|Tz|` or `|Ty|` > 5 mm | Optimizer attributes residual error to phantom Z/Y baseline | Improve capture diversity, or post-process the YAML to force `Tz=Ty=0` (loses some metric accuracy but keeps a useful rectification) |
 | `findChessboardCorners` fails on all pairs | Wrong pattern size | Count inner corners; pass `--cols/--rows` accordingly |
 
@@ -732,12 +750,12 @@ camera:
 
 camera_stereo:
     ros__parameters:
-        resource:       "/dev/video1"
+        resource:       "/dev/video-stereo"
         width:          3840
         height:         1200
         rotated_lenses: false      # false → 1440×900 per eye; true → 1200×1200 (legacy)
         cuda_flip:      "rotate-180"  # for upside-down mount
-        baseline_mm:    101.3
+        baseline_mm:    95.0       # fallback only; depth uses the calibration file
         calibration_file: "stereo_calib.yaml"
 
 stereo:

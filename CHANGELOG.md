@@ -45,6 +45,9 @@
   bench scene); not yet tested on a road.
 - `camera.flip` in `config/config.yaml` for a mono camera mounted upside down
   (`"rotate-180"`); `VisionSense_NX_3F0R` sets it.
+- `scripts/check_stereo_calib.py`: rectifies a live stereo pair with
+  `config/stereo_calib.yaml` and reports the vertical offset of matched
+  features, to tell whether the calibration still fits the camera.
 - Desktop launcher (`scripts/install_desktop_launcher.sh`, run by
   `install_all_deps.sh`): a **VisionSense** icon that runs
   `launch_visionsense.sh` in a terminal and opens the dashboard.
@@ -61,6 +64,10 @@
   stereo main eye again, as in 2F1R (v2.0.0 moved them to the mono camera).
   The mono camera is only for road damage, and
   `hardware.mono_calibration_file` is gone.
+- Stereo baseline defaults are 95 mm, the lens spacing of the current pair:
+  `camera_stereo.baseline_mm` (a fallback; depth takes the baseline from the
+  calibration file) and the sanity check of `compute_stereo_calib.py`
+  (`--baseline-mm`). `capture_stereo_calib.py` opens `/dev/video-stereo`.
 - The dashboard's driver view is sent at 640x360 (was 640x480), the mono
   camera's 16:9 shape.
 

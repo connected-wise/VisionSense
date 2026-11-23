@@ -49,7 +49,10 @@ camera_stereo:
         # AR0234 sensor is 5.76 mm wide. The 1440-wide eye is center-cropped to
         # 900×900 (= 5.76 × 900/1920 = 2.7 mm) before LightStereo resizes to 320.
         sensor_width_mm:    2.7
-        baseline_mm:        100.0
+        # Used only without a calibration_file. Depth takes the baseline from
+        # the calibration (it is in P2), so a new camera pair needs a new
+        # calibration, not just a new number here.
+        baseline_mm:        95.0
         focal_length_mm:    3.6
         calibration_file:   "stereo_calib.yaml"   # produced by scripts/compute_stereo_calib.py
 
