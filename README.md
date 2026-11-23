@@ -142,13 +142,27 @@ git clone -b VisionSense_Nano_2F1R https://github.com/connected-wise/VisionSense
 
 ### 1. Camera Node (`camera`)
 
-Captures video from mono cameras (CSI or USB) for driver monitoring.
+Captures video from the mono camera (CSI or USB): the driver camera in 2F1R,
+the road camera in 3F0R.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `resource` | string | `csi://0` | Camera source URI |
 | `width` | int | 1280 | Frame width |
 | `height` | int | 720 | Frame height |
+| `flip` | string | `""` | `"rotate-180"` for a camera mounted upside down |
+| `white_balance` | bool | false | Software white balance (see below). `config.yaml` takes `"on"`, `"off"` or `"auto"`; the launch file turns `"auto"` into on for an IMX477 |
+
+**Software white balance:** with the IMX477 tuning that ships in JetPack 7.2
+the image is magenta: the ISP subtracts too little black level and its auto
+white balance has no effect. An ISP override file does not change it on this
+release. The node therefore measures, for each green level, the red and blue
+that neutral surfaces get, and maps them back onto green with one lookup
+table per channel (about 1 ms per frame). This removes the tint, but colors
+stay less saturated and less accurate than from a correctly tuned ISP.
+
+If Argus stops delivering frames, the node exits after three capture timeouts
+and the launch file starts it again.
 
 **Topics Published:**
 - `/camera/raw` (`sensor_msgs/Image`) - Raw camera frames

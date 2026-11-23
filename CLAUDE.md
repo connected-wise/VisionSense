@@ -150,6 +150,7 @@ All are referenced from `CMakeLists.txt` `rosidl_generate_interfaces` block.
 
 - C++17, `-Ofast`, CUDA arch 87 (Orin).
 - No `cv::cuda::*` — write raw CUDA kernels in `src/cuda/`. The existing `stereo_rotate.cu`, `preprocess.cu`, and `stereo_rectify.cu` are the templates.
+- The IMX477 image is magenta on JetPack 7.2 (the shipped `imx477.nito` subtracts too little black level; Argus AWB does nothing). `camera_overrides.isp` is read but has no effect in NITO mode, `NVCAMERA_NITO_PATH=CONFIG` crashes nvargus-daemon, and other sensors' `.nito` files are rejected. The `camera` node's `white_balance` parameter corrects it in software; the launch file turns it on for an IMX477 (`camera.white_balance: "auto"`).
 - jetson-utils rotates CSI cameras by 180° by default and inverts the option: `camera.flip: ""` gives a `flip-method=2` pipeline, `"rotate-180"` gives the sensor's native orientation.
 - TRT engines are **not portable** across Jetson units / TRT versions. Regenerate from ONNX on the target device with `scripts/regenerate_engines.sh`, then rebuild (engines are installed into `share/` at build time).
 - C++ TRT pattern: deserialize → `setTensorAddress` → `cudaMallocAsync` GPU buffers → `cudaMemcpyAsync` H→D → `enqueueV3(stream)` → `cudaMemcpyAsync` D→H → `cudaStreamSynchronize`. See `src/node_driver_monitor.cpp` for the canonical example and `src/node_stereo_depth.cpp` for the two-input variant.
