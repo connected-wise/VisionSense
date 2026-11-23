@@ -71,8 +71,11 @@
   effect. The `camera` node corrects it in software (`camera.white_balance`,
   on by default for an IMX477). Colors are neutral again but less saturated
   than from a correctly tuned ISP.
-- Red and blue were swapped in the dashboard's stereo camera view and its
-  driver / road view: the dashboard encoded the cameras' RGB frames as BGR.
+- Red and blue were swapped in the dashboard's stereo camera view: the
+  dashboard encoded the cameras' RGB frames as BGR.
+- The mono camera published BGR frames labeled `rgb8`, so the driver
+  monitor, road damage and the dashboard all saw its red and blue exchanged.
+  It now publishes real RGB.
 - When Argus stopped delivering frames, the mono camera node logged a
   timeout every 10 s forever. It now exits after three timeouts and the
   launch file restarts it, which recovers the stream.
