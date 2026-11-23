@@ -92,8 +92,13 @@ std::vector<uint8_t> jpeg_encode(const cv::Mat &img) {
 // (cv::imencode and the WebRTC appsrc caps both expect it), but the cameras,
 // driver monitor and road damage publish rgb8; without the swap those streams
 // reach the browser with red and blue exchanged.
-void message_to_bgr(const sensor_msgs::ImageConstPtr &msg, cv::Mat &img) {
+// With a target size the frame is resized first, so the color swap runs on
+// the small image.
+void resize_to(cv::Mat &img, int width, int height);
+void message_to_bgr(const sensor_msgs::ImageConstPtr &msg, cv::Mat &img,
+                    int width = 0, int height = 0) {
     convert_message_to_frame(msg, img);
+    if (!img.empty() && width > 0) resize_to(img, width, height);
     if (!img.empty() && msg->encoding == "rgb8") {
         cv::Mat bgr;
         cv::cvtColor(img, bgr, cv::COLOR_RGB2BGR);
@@ -140,30 +145,42 @@ std::string json_escape(const std::string &s) {
 // push to the WS server.
 // ---------------------------------------------------------------------------
 
-// Fan a resized frame out to BOTH the WebRTC path (low-latency, NVENC H.264,
-// preferred) and the JPEG-over-WebSocket fallback (works on pure loopback
+// Fan a resized frame out to the WebRTC path (low-latency, NVENC H.264,
+// preferred) and to the JPEG-over-WebSocket fallback (works on pure loopback
 // without any ICE / mDNS / network state — required when WiFi is off because
 // libnice 0.1.18 hardcodes "ignore loopback" during ICE candidate gathering,
 // so webrtcbin's offer SDP carries no usable address).
 //
-// The client (dashboard.html) prefers the WebRTC <video> when its
-// MediaStream actually delivers frames, and uses the JPEG <img> otherwise.
-// Sending both costs ~5-8 ms of JPEG encode per stream per frame — small
-// compared to "dashboard is blind whenever WiFi drops".
+// The client (dashboard.html) shows the JPEG <img> until its WebRTC <video>
+// delivers frames, then tells us to stop the JPEG copy of that stream. The
+// JPEG encode costs ~5-8 ms per frame per stream, which with six streams at
+// camera rate was most of a CPU core, so it only runs while a client needs it.
 static inline void fan_out(StreamId stream, const cv::Mat &img,
                             std::atomic<uint32_t> &counter) {
     g_webrtc->push_frame(stream, img);
-    auto jpeg = jpeg_encode(img);
-    if (!jpeg.empty()) g_server->push_jpeg(stream, std::move(jpeg));
+    if (g_server->wants_jpeg(stream)) {
+        auto jpeg = jpeg_encode(img);
+        if (!jpeg.empty()) g_server->push_jpeg(stream, std::move(jpeg));
+    }
     counter.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Nobody is watching this stream (no browser, or none showing it): skip the
+// conversion, resize and encode. The counter still runs so the HZ readout of
+// a freshly connected page is right.
+static inline bool unwatched(StreamId stream, std::atomic<uint32_t> &counter) {
+    if (g_webrtc->has_active_subscribers(stream) || g_server->wants_jpeg(stream))
+        return false;
+    counter.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 void gui_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
+    if (unwatched(visionsense::STREAM_FUSED, g_count_fused)) return;
     cv::Mat img;
-    message_to_bgr(input, img);
-    resize_to(img, 1280, 720);
+    message_to_bgr(input, img, 1280, 720);
     fan_out(visionsense::STREAM_FUSED, img, g_count_fused);
 }
 
@@ -175,9 +192,9 @@ void camera_left_callback(const sensor_msgs::ImageConstPtr input) {
     if (g_camera_side.load(std::memory_order_relaxed) != 0) return;
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
+    if (unwatched(visionsense::STREAM_CAMERA, g_count_camera)) return;
     cv::Mat img;
-    message_to_bgr(input, img);
-    resize_to(img, 1280, 720);
+    message_to_bgr(input, img, 1280, 720);
     fan_out(visionsense::STREAM_CAMERA, img, g_count_camera);
 }
 
@@ -185,19 +202,19 @@ void camera_right_callback(const sensor_msgs::ImageConstPtr input) {
     if (g_camera_side.load(std::memory_order_relaxed) != 1) return;
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
+    if (unwatched(visionsense::STREAM_CAMERA, g_count_camera)) return;
     cv::Mat img;
-    message_to_bgr(input, img);
-    resize_to(img, 1280, 720);
+    message_to_bgr(input, img, 1280, 720);
     fan_out(visionsense::STREAM_CAMERA, img, g_count_camera);
 }
 
 void depth_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
+    if (unwatched(visionsense::STREAM_DEPTH, g_count_depth)) return;
     cv::Mat img;
-    message_to_bgr(input, img);
     // depth_color upstream is already turbo/inferno-colorized.
-    resize_to(img, 720, 450);
+    message_to_bgr(input, img, 720, 450);
     fan_out(visionsense::STREAM_DEPTH, img, g_count_depth);
 }
 
@@ -206,15 +223,16 @@ void depth_callback(const sensor_msgs::ImageConstPtr input) {
 void driver_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
+    if (unwatched(visionsense::STREAM_DRIVER, g_count_driver)) return;
     cv::Mat img;
-    message_to_bgr(input, img);
-    resize_to(img, 640, 360);
+    message_to_bgr(input, img, 640, 360);
     fan_out(visionsense::STREAM_DRIVER, img, g_count_driver);
 }
 
 void bev_callback(const sensor_msgs::ImageConstPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
+    if (unwatched(visionsense::STREAM_BEV, g_count_bev)) return;
     cv::Mat img;
     message_to_bgr(input, img);
     // BEV is 480×360 native; no resize needed.
@@ -224,12 +242,16 @@ void bev_callback(const sensor_msgs::ImageConstPtr input) {
 void detection_callback(const visionconnect::msg::Detect::SharedPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
-    auto img_msg = std::make_shared<sensor_msgs::msg::Image>(input->image);
-    cv::Mat img;
-    message_to_bgr(img_msg, img);
-    auto jpeg = jpeg_encode(img);
-    if (!jpeg.empty()) {
-        g_server->push_jpeg(visionsense::STREAM_DETECT, std::move(jpeg));
+    // The image copy and encode only run for a client that shows this
+    // stream (dashboard.html does not, and opts out when it connects).
+    if (g_server->wants_jpeg(visionsense::STREAM_DETECT)) {
+        auto img_msg = std::make_shared<sensor_msgs::msg::Image>(input->image);
+        cv::Mat img;
+        message_to_bgr(img_msg, img);
+        auto jpeg = jpeg_encode(img);
+        if (!jpeg.empty()) {
+            g_server->push_jpeg(visionsense::STREAM_DETECT, std::move(jpeg));
+        }
     }
 
     // Log: detection count + per-object class/score, sent as JSON.
@@ -251,13 +273,14 @@ void detection_callback(const visionconnect::msg::Detect::SharedPtr input) {
 void lanes_callback(const visionconnect::msg::Lanes::SharedPtr input) {
     static auto last = std::chrono::steady_clock::now();
     if (!rate_limit(last)) return;
-    auto lane_msg = std::make_shared<sensor_msgs::msg::Image>(input->laneimg);
-    cv::Mat lane_img;
-    message_to_bgr(lane_msg, lane_img);
-    resize_to(lane_img, 640, 360);
-    auto jpeg = jpeg_encode(lane_img);
-    if (!jpeg.empty()) {
-        g_server->push_jpeg(visionsense::STREAM_LANES, std::move(jpeg));
+    if (g_server->wants_jpeg(visionsense::STREAM_LANES)) {
+        auto lane_msg = std::make_shared<sensor_msgs::msg::Image>(input->laneimg);
+        cv::Mat lane_img;
+        message_to_bgr(lane_msg, lane_img, 640, 360);
+        auto jpeg = jpeg_encode(lane_img);
+        if (!jpeg.empty()) {
+            g_server->push_jpeg(visionsense::STREAM_LANES, std::move(jpeg));
+        }
     }
 
     std::ostringstream html;
@@ -278,34 +301,36 @@ void classify_callback(const visionconnect::msg::Signs::SharedPtr input) {
     if (!rate_limit(last)) return;
     if (input->images.empty()) return;
 
-    // Build a vertical stack of detected-sign crops with their labels overlaid.
-    std::vector<cv::Mat> stacked;
-    for (size_t i = 0; i < input->images.size() && i < input->labels.size(); ++i) {
-        auto im = std::make_shared<sensor_msgs::msg::Image>(input->images[i]);
-        cv::Mat crop;
-        message_to_bgr(im, crop);
-        if (crop.empty()) continue;
-        cv::resize(crop, crop, cv::Size(200, 200));
-        std::string info = input->labels[i];
-        if (i < input->scores.size()) {
-            info += " (" + std::to_string(static_cast<int>(input->scores[i] * 100)) + "%)";
+    if (g_server->wants_jpeg(visionsense::STREAM_SIGNS)) [&]() {
+        // Build a vertical stack of detected-sign crops with their labels overlaid.
+        std::vector<cv::Mat> stacked;
+        for (size_t i = 0; i < input->images.size() && i < input->labels.size(); ++i) {
+            auto im = std::make_shared<sensor_msgs::msg::Image>(input->images[i]);
+            cv::Mat crop;
+            message_to_bgr(im, crop);
+            if (crop.empty()) continue;
+            cv::resize(crop, crop, cv::Size(200, 200));
+            std::string info = input->labels[i];
+            if (i < input->scores.size()) {
+                info += " (" + std::to_string(static_cast<int>(input->scores[i] * 100)) + "%)";
+            }
+            cv::putText(crop, info, cv::Point(8, crop.rows - 10),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
+            stacked.push_back(crop);
         }
-        cv::putText(crop, info, cv::Point(8, crop.rows - 10),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
-        stacked.push_back(crop);
-    }
-    if (stacked.empty()) return;
-    cv::Mat composite;
-    if (stacked.size() == 1) composite = stacked[0];
-    else cv::vconcat(stacked, composite);
-    if (composite.rows > 600) {
-        double scale = 600.0 / composite.rows;
-        cv::resize(composite, composite, cv::Size(0, 0), scale, scale);
-    }
-    auto jpeg = jpeg_encode(composite);
-    if (!jpeg.empty()) {
-        g_server->push_jpeg(visionsense::STREAM_SIGNS, std::move(jpeg));
-    }
+        if (stacked.empty()) return;
+        cv::Mat composite;
+        if (stacked.size() == 1) composite = stacked[0];
+        else cv::vconcat(stacked, composite);
+        if (composite.rows > 600) {
+            double scale = 600.0 / composite.rows;
+            cv::resize(composite, composite, cv::Size(0, 0), scale, scale);
+        }
+        auto jpeg = jpeg_encode(composite);
+        if (!jpeg.empty()) {
+            g_server->push_jpeg(visionsense::STREAM_SIGNS, std::move(jpeg));
+        }
+    }();
 
     std::ostringstream html;
     html << "Classified " << input->labels.size() << " sign"
@@ -421,6 +446,15 @@ int main(int argc, char **argv) {
     g_server->set_text_handler(
         [](visionsense::ClientHandle c, const std::string &json) {
             if (g_webrtc->on_signaling_message(c, json)) return true;
+            // App-level: {"t":"jpeg","stream":N,"on":false} — this client's
+            // WebRTC video for stream N is playing, stop its JPEG copy.
+            if (json.find("\"t\":\"jpeg\"") != std::string::npos) {
+                size_t pos = json.find("\"stream\":");
+                int stream = (pos == std::string::npos) ? 0 : std::atoi(json.c_str() + pos + 9);
+                bool on = json.find("\"on\":true") != std::string::npos;
+                g_server->set_jpeg_wanted(c, static_cast<StreamId>(stream), on);
+                return true;
+            }
             // App-level: {"t":"camera-side","side":"left|right"}
             if (json.find("\"camera-side\"") != std::string::npos) {
                 if (json.find("\"right\"") != std::string::npos) {
@@ -476,10 +510,26 @@ int main(int argc, char **argv) {
     img_qos.best_effort();
     img_qos.durability_volatile();
 
-    auto cam_left_sub = node->create_subscription<sensor_msgs::Image>(
-        "image_in", img_qos, camera_left_callback);
-    auto cam_right_sub = node->create_subscription<sensor_msgs::Image>(
-        "image_in_right", img_qos, camera_right_callback);
+    // Only the eye the browser shows is subscribed: each eye is a 3.9 MB
+    // message at camera rate, and receiving the unused one cost as much CPU
+    // as the one on screen. A side switch takes effect within 250 ms.
+    rclcpp::Subscription<sensor_msgs::Image>::SharedPtr cam_sub;
+    int cam_sub_side = -1;
+    auto subscribe_camera_side = [&]() {
+        const int side = g_camera_side.load(std::memory_order_relaxed);
+        if (side == cam_sub_side) return;
+        cam_sub.reset();
+        if (side == 0)
+            cam_sub = node->create_subscription<sensor_msgs::Image>(
+                "image_in", img_qos, camera_left_callback);
+        else
+            cam_sub = node->create_subscription<sensor_msgs::Image>(
+                "image_in_right", img_qos, camera_right_callback);
+        cam_sub_side = side;
+    };
+    subscribe_camera_side();
+    auto cam_side_timer = node->create_wall_timer(
+        std::chrono::milliseconds(250), [&]() { subscribe_camera_side(); });
     auto gui_sub = node->create_subscription<sensor_msgs::Image>(
         "gui_in", img_qos, gui_callback);
     auto depth_sub = node->create_subscription<sensor_msgs::Image>(

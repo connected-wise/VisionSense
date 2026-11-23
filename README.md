@@ -369,11 +369,11 @@ the 3F0R layout instead of the driver monitor.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `engine` | string | `road-damage/yolov8s-pothole-seg_fp16.engine` | Segmentation model |
+| `engine` | string | `road-damage/yolov8s-pothole-seg-384x640_fp16.engine` | Segmentation model |
 | `camera_topic` | string | `/camera/raw` | Input camera topic |
 | `labels` | string | `pothole` | Class names in model order, comma-separated |
 | `confidence` | float | 0.4 | Detection threshold |
-| `max_rate_hz` | float | 5.0 | Frames per second to segment, 0 for every camera frame |
+| `max_rate_hz` | float | 10.0 | Frames per second to segment (0.0 = every camera frame). Every frame is published; the ones in between are drawn with the latest result |
 | `log_dir` | string | `~/VisionSense_data/road_damage` | Event log folder, empty to turn it off |
 | `log_interval_s` | float | 2.0 | Shortest time between two logged events |
 
@@ -392,8 +392,8 @@ latitude, longitude, altitude, count, label, highest confidence, mask area as
 % of the image, image file) and saves the annotated frame as a JPEG. The
 position columns stay empty without a GPS fix.
 
-**Model:** YOLOv8s-seg (640×640 input, one class, 32 mask prototypes at
-160×160) from [saadfrh/Pothole-Detection](https://github.com/saadfrh/Pothole-Detection),
+**Model:** YOLOv8s-seg (640×384 input, one class, 32 mask prototypes at
+160×96) from [saadfrh/Pothole-Detection](https://github.com/saadfrh/Pothole-Detection),
 which reports mask mAP50 0.93 on its own validation set. Its training images
 are mostly close-up road photos, so expect to fine-tune it on frames from the
 fleet's own cameras. The node reads the class count and tensor sizes from the
@@ -403,10 +403,13 @@ engine, so another YOLOv8-seg or YOLO11-seg export works with only the
 
 The repo holds only the ONNX file. Build the engine on the device with
 `bash scripts/regenerate_engines.sh road`, then rebuild the workspace. On an
-Orin NX 8GB the model alone takes about 7 ms per frame. The node segments
-5 frames per second by default (`max_rate_hz`): every GPU node slows the
-others down, and at the camera's full rate this one made stereo depth about
-50% slower.
+Orin NX 8GB the model alone takes about 5 ms per frame. The ONNX is the
+repo's `best.pt` exported with Ultralytics at `imgsz=(384, 640)`: a 16:9
+camera frame fills that input, where a 640×640 one spent 44% of its pixels
+(and 7.4 ms per frame) on letterbox bars. The node segments 10 frames per
+second by default (`max_rate_hz`) and publishes every frame: every GPU node
+slows the others down, and segmenting at the camera's full rate made stereo
+depth about 50% slower.
 
 ---
 
@@ -792,7 +795,7 @@ driver_monitor:
 | `lightstereo_s_320x512.engine` | Stereo Depth | 320×512 | TensorRT FP16, LightStereo-S (ICRA 2025) — 2D cost aggregation, ~16 ms compute |
 | `yolov11n_face_fp16.engine` | Face Detection | 640×640 | TensorRT FP16 |
 | `resnet18_gaze_fp16.engine` | Gaze Estimation | 448×448 | TensorRT FP16 |
-| `yolov8s-pothole-seg_fp16.engine` | Pothole Segmentation (3F0R) | 640×640 | TensorRT FP16 |
+| `yolov8s-pothole-seg-384x640_fp16.engine` | Pothole Segmentation (3F0R) | 640×384 | TensorRT FP16 |
 
 ## ROS2 Topics Overview
 

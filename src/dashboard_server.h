@@ -53,6 +53,9 @@ struct ClientSession {
     // Latest JPEG per stream id (1..8). slot 0 unused.
     std::array<std::vector<uint8_t>, STREAM_COUNT> latest_jpeg;
     std::array<bool, STREAM_COUNT> jpeg_dirty{};
+    // Streams this client no longer needs as JPEG because its WebRTC video
+    // for them is playing ({"t":"jpeg","stream":N,"on":false}).
+    std::array<bool, STREAM_COUNT> jpeg_off{};
     // Pending JSON text messages (newest at back). Capped to 64; oldest drop.
     std::deque<std::string> json_queue;
     // Round-robin pointer so we don't starve later streams.
@@ -91,6 +94,13 @@ public:
     // Thread-safe: replace the latest JPEG for a given stream and wake all
     // clients so the writable callback flushes the new frame.
     void push_jpeg(StreamId id, std::vector<uint8_t> jpeg);
+
+    // Thread-safe: does any connected client still need this stream as
+    // JPEG? False with no clients, so callers can skip the encode.
+    bool wants_jpeg(StreamId id);
+
+    // Thread-safe: a client turns the JPEG copy of one stream off or on.
+    void set_jpeg_wanted(ClientHandle client, StreamId id, bool wanted);
 
     // Thread-safe: enqueue a JSON text message for every client.
     void push_json(std::string json);

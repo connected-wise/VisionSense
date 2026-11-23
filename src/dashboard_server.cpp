@@ -176,11 +176,30 @@ void DashboardServer::push_jpeg(StreamId id, std::vector<uint8_t> jpeg) {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     if (clients_.empty()) return;
     for (auto *client : clients_) {
+        if (client->jpeg_off[id]) continue;
         client->latest_jpeg[id] = jpeg;  // copy per client; cheap (≤25 KB)
         client->jpeg_dirty[id] = true;
         lws_callback_on_writable(client->wsi);
     }
     if (ctx_) lws_cancel_service(ctx_);
+}
+
+bool DashboardServer::wants_jpeg(StreamId id) {
+    if (id < STREAM_FUSED || id >= STREAM_COUNT) return false;
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    for (auto *client : clients_) {
+        if (!client->jpeg_off[id]) return true;
+    }
+    return false;
+}
+
+void DashboardServer::set_jpeg_wanted(ClientHandle handle, StreamId id,
+                                       bool wanted) {
+    if (id < STREAM_FUSED || id >= STREAM_COUNT) return;
+    auto *client = static_cast<ClientSession *>(handle);
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    if (clients_.find(client) == clients_.end()) return;  // gone
+    client->jpeg_off[id] = !wanted;
 }
 
 void DashboardServer::push_json(std::string json) {

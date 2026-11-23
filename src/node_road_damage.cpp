@@ -314,11 +314,15 @@ double last_damage_ms = -1e12;
 int last_count = 0;
 const double HOLD_MS = 1000.0;
 
-// Frames are skipped to keep to max_rate_hz. Segmenting every camera frame
-// is not needed to find potholes, and the GPU is shared: at the camera's full
-// rate this node alone made stereo depth about 50% slower on an Orin NX.
-double max_rate_hz = 5.0;
-double last_frame_ms = -1e12;
+// Every camera frame is published, so the view stays smooth, but only
+// max_rate_hz of them are segmented; the frames in between are drawn with the
+// latest result. Segmenting every frame is not needed to find potholes, and
+// the GPU is shared: at the camera's full rate this node alone made stereo
+// depth about 50% slower on an Orin NX.
+double max_rate_hz = 10.0;
+double last_segment_ms = -1e12;
+std::vector<Damage> last_found;
+cv::Mat last_mask;
 
 // Event log: one CSV row and one annotated JPEG per event
 std::string log_dir;
@@ -451,9 +455,9 @@ void logEvent(const cv::Mat& annotated_rgb, const std::vector<Damage>& found) {
 void image_callback(const sensor_msgs::Image::SharedPtr msg) {
     double t0 = 0, t1 = 0, t2 = 0;
     const double now_ms = rd_get_time_ms();
-    // 10% slack so a frame that arrives a little early is not skipped
-    if (max_rate_hz > 0 && now_ms - last_frame_ms < 900.0 / max_rate_hz) return;
-    last_frame_ms = now_ms;
+    // 10% slack so a frame that arrives a little early still counts as due
+    const bool segment_now =
+        !(max_rate_hz > 0 && now_ms - last_segment_ms < 900.0 / max_rate_hz);
     if (enable_timing) t0 = now_ms;
 
     // The model wants RGB, which is what the camera publishes; the annotated
@@ -483,16 +487,20 @@ void image_callback(const sensor_msgs::Image::SharedPtr msg) {
     }
 
     // Segment on the clean frame (output is still an unannotated copy here)
-    cv::Mat mask;
-    auto found = segmenter->segment(output, mask);
+    if (segment_now) {
+        last_segment_ms = now_ms;
+        last_found = segmenter->segment(output, last_mask);
+        if (!last_found.empty()) {
+            last_damage_ms = now_ms;
+            last_count = (int)last_found.size();
+        }
+    }
+    const std::vector<Damage>& found = last_found;
 
     if (enable_timing) t1 = rd_get_time_ms();
 
-    if (!found.empty()) {
-        last_damage_ms = now_ms;
-        last_count = (int)found.size();
-        drawDamage(output, found, mask);
-    }
+    if (!found.empty())
+        drawDamage(output, found, last_mask);
     int count = (now_ms - last_damage_ms <= HOLD_MS) ? last_count : 0;
     std::string state = stateName(found, count);
 
@@ -501,7 +509,8 @@ void image_callback(const sensor_msgs::Image::SharedPtr msg) {
     cv::putText(output, state, cv::Point(10, 30),
                 cv::FONT_HERSHEY_SIMPLEX, 0.8, color, 2);
 
-    logEvent(output, found);
+    if (segment_now)
+        logEvent(output, found);
 
     // Publish state
     std_msgs::msg::String state_msg;
@@ -576,7 +585,7 @@ int main(int argc, char** argv) {
     // Defaults. A relative engine path resolves against the installed graphs
     // directory (share/visionconnect/graphs), like detect/lanedet/classify.
     if (engine.empty())
-        engine = "road-damage/yolov8s-pothole-seg_fp16.engine";
+        engine = "road-damage/yolov8s-pothole-seg-384x640_fp16.engine";
     if (camera_topic.empty())
         camera_topic = "/camera/raw";
     if (labels_str.empty())
