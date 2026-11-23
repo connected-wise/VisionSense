@@ -3,6 +3,7 @@
 # Stereo depth backend: LightStereo-S TensorRT (scripts/stereo_depth_lightstereo.py).
 # ICRA 2025, OpenStereo authors — ~16ms GPU compute at 320×512 on Orin NX.
 
+import glob
 import os
 import subprocess
 import yaml
@@ -110,12 +111,30 @@ def generate_launch_description():
 		# on the X server and the capture dies with "Failed to initialize
 		# EGLDisplay" when X refuses the connection (e.g. launched over SSH).
 		# Without it Argus uses its headless EGL display, which always works.
+		# camera.white_balance: "auto" turns the node's software white balance
+		# on for an IMX477, whose JetPack 7.2 ISP tuning gives a magenta
+		# image, and off otherwise.
+		camera_params = dict(config["camera"]["ros__parameters"])
+		wb = camera_params.get("white_balance", "auto")
+		if isinstance(wb, str) and wb.lower() == "auto":
+			wb = False
+			for name_file in glob.glob("/sys/class/video4linux/video*/name"):
+				try:
+					with open(name_file) as fp:
+						wb = wb or "imx477" in fp.read().lower()
+				except OSError:
+					pass
+		elif isinstance(wb, str):
+			wb = wb.lower() in ("on", "true", "yes", "1")
+		camera_params["white_balance"] = bool(wb)
+		print(f"[visionsense.launch] mono camera software white balance: "
+		      f"{'on' if camera_params['white_balance'] else 'off'}")
 		camera_node = Node(
 			package="visionconnect",
 			name="camera",
 			executable="camera",
 			output="screen",
-			parameters=[config["camera"]["ros__parameters"]],
+			parameters=[camera_params],
 			prefix="env -u DISPLAY -u XAUTHORITY -u WAYLAND_DISPLAY",
 			# The node exits when Argus stops delivering frames; a new
 			# session recovers it.

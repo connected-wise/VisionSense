@@ -66,6 +66,16 @@
 
 ### Fixed
 
+- Purple tint on the IMX477 mono camera with JetPack 7.2, whose ISP tuning
+  subtracts too little black level and whose auto white balance has no
+  effect. The `camera` node corrects it in software (`camera.white_balance`,
+  on by default for an IMX477). Colors are neutral again but less saturated
+  than from a correctly tuned ISP.
+- Red and blue were swapped in the dashboard's stereo camera view and its
+  driver / road view: the dashboard encoded the cameras' RGB frames as BGR.
+- When Argus stopped delivering frames, the mono camera node logged a
+  timeout every 10 s forever. It now exits after three timeouts and the
+  launch file restarts it, which recovers the stream.
 - The dashboard did not open on Ubuntu 24.04: the snap Chromium cannot write
   its kiosk profile to `~/.cache` and exited at once. The profile now goes in
   `~/snap/chromium/common` when the snap is installed.
