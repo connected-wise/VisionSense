@@ -68,11 +68,23 @@
   `camera_stereo.baseline_mm` (a fallback; depth takes the baseline from the
   calibration file) and the sanity check of `compute_stereo_calib.py`
   (`--baseline-mm`). `capture_stereo_calib.py` opens `/dev/video-stereo`.
-- `road_damage` segments 5 frames per second by default (`max_rate_hz`)
-  instead of every camera frame. On the Orin NX 8GB the GPU is saturated by
-  the full pipeline, and at full rate this node raised stereo depth's
-  inference time from about 70 ms to about 107 ms per frame (35 ms with the
-  GPU to itself).
+- `road_damage` uses a 640x384 export of the same pothole model (4.9 ms per
+  frame on the Orin NX 8GB instead of 7.4 ms; the 640x640 one spent 44% of
+  its input on letterbox bars), segments 10 frames per second by default
+  (`max_rate_hz`) and still publishes every camera frame, drawn with the
+  latest result. Segmenting every frame raised stereo depth's inference time
+  from about 70 ms to about 107 ms per frame.
+- Dashboard CPU: a stream is only converted and encoded while a browser
+  shows it, the JPEG copy of a stream stops once the browser's WebRTC video
+  for it is playing (`{"t":"jpeg","stream":N,"on":false}`), the lane,
+  detection and sign JPEG streams the page never showed are no longer
+  encoded for it, and only the stereo eye on screen is subscribed. The node
+  went from about 85% of a core with no browser, and 110-130% with one, to
+  about 27% and 73%.
+- `stereo_depth_ffs.depth_color_publish_w` is 720 (was full resolution). The
+  full-size image was a 3.9 MB message per frame and most were dropped on
+  the way: the dashboard's depth view updated about 2 times a second while
+  the node produced 7; it now shows about 6.
 - `stereo_depth_ffs` has an `enable_timing` parameter that logs the time
   spent per stage and the age of its input.
 - The dashboard's driver view is sent at 640x360 (was 640x480), the mono
