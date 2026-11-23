@@ -30,6 +30,10 @@ camera:
         # degrees unless told otherwise, so "" suits a camera mounted the usual
         # way and "rotate-180" one mounted upside down relative to that.
         flip:               "rotate-180"   # this rig's mono camera is mounted upside down
+        # Software white balance in the camera node: "on", "off", or "auto"
+        # (on for an IMX477, whose image is magenta with the ISP tuning of
+        # JetPack 7.2).
+        white_balance:      "auto"
 
 camera_stereo:
     ros__parameters:
