@@ -154,6 +154,7 @@ All are referenced from `CMakeLists.txt` `rosidl_generate_interfaces` block.
 - No `cv::cuda::*` — write raw CUDA kernels in `src/cuda/`. The existing `stereo_rotate.cu`, `preprocess.cu`, and `stereo_rectify.cu` are the templates.
 - The IMX477 image is magenta on JetPack 7.2 (the shipped `imx477.nito` subtracts too little black level; Argus AWB does nothing). `camera_overrides.isp` is read but has no effect in NITO mode, `NVCAMERA_NITO_PATH=CONFIG` crashes nvargus-daemon, and other sensors' `.nito` files are rejected. The `camera` node's `white_balance` parameter corrects it in software; the launch file turns it on for an IMX477 (`camera.white_balance: "auto"`).
 - jetson-utils rotates CSI cameras by 180° by default and inverts the option: `camera.flip: ""` gives a `flip-method=2` pipeline, `"rotate-180"` gives the sensor's native orientation.
+- The Orin NX 8GB GPU is saturated by the full pipeline (98-99%), and separate processes are time-sliced, so every extra inference slows all the others: FFS depth takes 35 ms alone and about 80 ms in the pipeline. Measure with `stereo_depth_ffs.enable_timing` before and after adding GPU work, and rate-limit what does not need every frame (`road_damage.max_rate_hz`).
 - TRT engines are **not portable** across Jetson units / TRT versions. Regenerate from ONNX on the target device with `scripts/regenerate_engines.sh`, then rebuild (engines are installed into `share/` at build time).
 - C++ TRT pattern: deserialize → `setTensorAddress` → `cudaMallocAsync` GPU buffers → `cudaMemcpyAsync` H→D → `enqueueV3(stream)` → `cudaMemcpyAsync` D→H → `cudaStreamSynchronize`. See `src/node_driver_monitor.cpp` for the canonical example and `src/node_stereo_depth.cpp` for the two-input variant.
 - Don't add throttled logging — `ROS_WARN_THROTTLE` etc. are not defined in `ros_compat.h`. Gate with `(frame_count_ % N) == 0` instead.
@@ -161,7 +162,7 @@ All are referenced from `CMakeLists.txt` `rosidl_generate_interfaces` block.
 ## Web Dashboard
 
 - Single binary `node_dashboard` serves `launch/dashboard/dashboard.html` over HTTP + WebSocket on `:8080`.
-- Wire protocol: binary JPEG frames (stream-id byte + data) for images, JSON for telemetry.
+- Wire protocol: WebRTC H.264 per stream, with binary JPEG frames (stream-id byte + data) as the fallback, and JSON for telemetry. A stream is only converted/encoded while a client shows it; the page sends `{"t":"jpeg","stream":N,"on":false}` once its video for stream N plays, and the JPEG copy stops. Keep it that way: encoding every stream twice cost more than a CPU core.
 - `ui.dashboard: true` in `config/config.yaml` auto-opens Chromium in kiosk mode to `http://localhost:8080/` when VisionSense launches.
 - **Do not add rosbridge or a separate Python HTTP server** — that architecture was rejected.
 

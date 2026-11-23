@@ -75,7 +75,10 @@ stereo_depth_ffs:
         depth_vmax:             100.0    # FFS handles farther depths sensibly
         warmup_iters:           3
         sync_slop_s:            0.05
-        depth_color_publish_w:  0
+        # Width of the colorized depth image (0 = full eye resolution). The
+        # dashboard shows it at 720, and a full-size one is a 3.9 MB message
+        # per frame, most of which got dropped on the way to the dashboard.
+        depth_color_publish_w:  720
 
 detect:
     ros__parameters:
@@ -165,14 +168,15 @@ adas:
 road_damage:
     ros__parameters:
         # Relative to share/visionconnect/graphs; absolute paths also work.
-        engine:         "road-damage/yolov8s-pothole-seg_fp16.engine"
+        engine:         "road-damage/yolov8s-pothole-seg-384x640_fp16.engine"
         camera_topic:   "/camera/raw"
         labels:         "pothole"   # class names in model order, comma-separated
         confidence:     0.4
-        # Frames per second to segment (0 = every camera frame). The GPU is
-        # shared with stereo depth, detection and lanes; at the camera's full
-        # rate this node alone slows depth by about half.
-        max_rate_hz:    5.0
+        # Frames per second to segment (0.0 = every camera frame). Every frame
+        # is still published, drawn with the latest result. The GPU is shared
+        # with stereo depth, detection and lanes; at the camera's full rate
+        # this node alone slows depth by about half.
+        max_rate_hz:    10.0
         # Each event appends a row (time, GPS position, count, confidence,
         # area) to events.csv here and saves the annotated frame. "" = off.
         log_dir:        "~/VisionSense_data/road_damage"

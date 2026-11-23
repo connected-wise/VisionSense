@@ -743,6 +743,9 @@ footer {
         s.video.hidden = false;
         s.img.hidden = true;
         if (id === activeStream) updateHero();
+        // The video is playing: the server can stop encoding and sending
+        // the JPEG copy of this stream.
+        send({ t: "jpeg", stream: id, on: false });
       };
       // Zero the receiver's jitter buffer hint — Chrome defaults to ~100 ms
       // of buffering for smoothness, which dominates perceived latency on
@@ -929,6 +932,11 @@ footer {
       // Kick off WebRTC negotiation for every visible stream as soon as the
       // signaling channel is up. Each gets its own RTCPeerConnection.
       for (const id of VISIBLE_STREAMS) startWebRTC(id);
+      // Streams 6-8 (lanes, detections, signs as JPEG) are not shown on this
+      // page; tell the server not to encode them for us.
+      for (const id of [6, 7, 8]) {
+        if (!streams[id]) send({ t: "jpeg", stream: id, on: false });
+      }
     };
     ws.onmessage = (ev) => {
       if (typeof ev.data !== "string") {
