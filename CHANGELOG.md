@@ -73,6 +73,16 @@
 
 ### Fixed
 
+- Stereo depth was unusable with the current camera pair. The calibration in
+  the repo belonged to an older assembly (about 107 px of vertical offset
+  after rectification), and the two eyes were exchanged:
+  `/camera_stereo/left` carried the right camera. `camera_stereo` has a new
+  `swap_eyes` parameter (on in `config.yaml`), and `config/stereo_calib.yaml`
+  is a new calibration of the current pair: 95 usable chessboard pairs,
+  stereo RMS 0.53 px, baseline 94.97 mm. Checked on a live pair: about 1 px
+  of vertical offset and positive disparity. `adas.ref_center_x_normalized`
+  follows the new left eye's optical center (0.34, was 0.65) and still has
+  to be confirmed on a road.
 - Purple tint on the IMX477 mono camera with JetPack 7.2, whose ISP tuning
   subtracts too little black level and whose auto white balance has no
   effect. The `camera` node corrects it in software (`camera.white_balance`,

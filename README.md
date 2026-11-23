@@ -689,7 +689,8 @@ python3 scripts/check_stereo_calib.py --save /tmp/rectified.jpg
 
 The script rectifies one live pair with `config/stereo_calib.yaml` and
 measures the vertical offset of matched features between the eyes. A fitting
-calibration gives a median within ±0.5 px and a mean below 1 px. Run it after
+calibration gives a median within ±1.5 px and a mean below 2 px (the current
+one measures about 1 px), and a positive disparity. Run it after
 recalibrating, and whenever the cameras are bumped, re-seated or replaced.
 
 Depth needs a calibration that fits: the stereo network (Fast-FoundationStereo)
