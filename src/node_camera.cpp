@@ -175,8 +175,13 @@ bool aquireFrame()
 		ROS_INFO("Camera initialized: %dx%d", width, height);
 	}
 
+	// Publish RGB, as the message's encoding says and as camera_stereo does.
+	// (imageConverter::ROSOutputFormat is BGR: with it the frames went out as
+	// BGR labeled "rgb8", so every consumer saw red and blue exchanged.)
+	const imageFormat output_format = IMAGE_RGB8;
+
 	// assure correct image size
-	if( !image_cvt->Resize(width, height, imageConverter::ROSOutputFormat) )
+	if( !image_cvt->Resize(width, height, output_format) )
 	{
 		ROS_ERROR("failed to resize camera image converter");
 		return false;
@@ -189,7 +194,7 @@ bool aquireFrame()
 
 	// Use imageConverter but copy to our pre-allocated buffer
 	sensor_msgs::Image temp_msg;
-	if( !image_cvt->Convert(temp_msg, imageConverter::ROSOutputFormat, nextFrame) )
+	if( !image_cvt->Convert(temp_msg, output_format, nextFrame) )
 	{
 		ROS_ERROR("failed to convert video stream frame to sensor_msgs::Image");
 		return false;
