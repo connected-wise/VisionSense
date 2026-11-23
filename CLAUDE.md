@@ -69,7 +69,7 @@ ros2 run visionconnect stereo_depth_lightstereo.py   # Python fallback (installe
 
 1. **Who publishes `/camera/raw` depends on the mono sensor.** With an IMX477, `visionsense.launch.py` starts the `camera` node itself. With an IMX219, the camera lives in `visionsense-imx219.service` and the launch only subscribes (it skips its own `camera` node whenever that unit is active) — see [IMX219 reopen bug](#imx219-reopen-bug-and-systemd-service) below.
 
-2. **Stereo eye topic labels match the physical sensor wiring after the user's sensor swap.** The old in-code `cudaStereoCropSplitFlip(... right_gpu, left_gpu, ...)` swap was removed; the kernel now goes straight `(leftOut → /camera_stereo/left, rightOut → /camera_stereo/right)`. `stereo.main_eye` in `config/config.yaml` was flipped from `right` to `left` to match.
+2. **`/camera_stereo/left` must be the physical left camera.** The CUDA kernel writes the frame's left half to its first output; with the pair mounted upside down (`cuda_flip: rotate-180`) that half is the right camera, so `camera_stereo.swap_eyes: true` exchanges the outputs. `scripts/capture_stereo_calib.py` follows the same setting. A correctly ordered pair calibrates to a negative `Tx` and `scripts/check_stereo_calib.py` reports positive disparity; the opposite means the eyes are exchanged. `stereo.main_eye` is `left`, which is also the camera depth is referenced to.
 
 3. **Stereo depth requires rectification**, done inside `stereo_depth` via `cv::initUndistortRectifyMap` (at MODEL resolution, not eye resolution — the maps are baked into a fused CUDA kernel). `camera_stereo` does NOT rectify; it publishes raw cropped+rotated images. Other consumers (detect/lanedet/gui) get raw images and don't need rectification.
 
@@ -107,7 +107,7 @@ python3 compute_stereo_calib.py \
 # --reject-threshold 1.5 px)
 ```
 
-To check whether the current `config/stereo_calib.yaml` still fits the camera (after a bump, a re-seat, or new hardware), run `python3 scripts/check_stereo_calib.py` while VisionSense is running. It rectifies a live pair and measures the vertical offset of matched features; more than about 1 px means recalibrate. Depth takes its baseline from the calibration file (`P2`), so `camera_stereo.baseline_mm` in `config.yaml` matters only without a calibration file. FFS does not make calibration optional: it matches along rows of the rectified pair.
+To check whether the current `config/stereo_calib.yaml` still fits the camera (after a bump, a re-seat, or new hardware), run `python3 scripts/check_stereo_calib.py` while VisionSense is running. It rectifies a live pair and measures the vertical offset of matched features; more than about 1.5 px means recalibrate, and a negative disparity means the eyes are exchanged (`camera_stereo.swap_eyes`). Depth takes its baseline from the calibration file (`P2`), so `camera_stereo.baseline_mm` in `config.yaml` matters only without a calibration file. FFS does not make calibration optional: it matches along rows of the rectified pair.
 
 Expected calibration quality:
 - per-eye RMS < 0.5 px
@@ -174,7 +174,7 @@ All are referenced from `CMakeLists.txt` `rosidl_generate_interfaces` block.
 | Topics look silent despite "ready" log | `ls /dev/shm/fastrtps_* \| wc -l` — wipe if >5–10 (`rm -f /dev/shm/fastrtps_*`) |
 | Stereo depth all yellow / no structure | `depth_vmax` in `config/config.yaml` — drop to 5.0 for indoor scenes (was 20.0 by default) |
 | Bogus `fx_rect`, all-black rectified sample | `config/stereo_calib.yaml` has degenerate `(R, T)`. Recapture with varied poses, or force `Ty=Tz=0`. See [Stereo Calibration Workflow](#stereo-calibration-workflow). |
-| Stereo L/R labels look swapped | Check `src/node_camera_stereo.cpp:298` (the `cudaStereoCropSplitFlip` arg order) AND `stereo.main_eye` in `config.yaml`. The fix has to be in BOTH places or the calibration is also remapped. |
+| Stereo L/R labels look swapped, depth is garbage | `python3 scripts/check_stereo_calib.py`: negative disparity means `camera_stereo.swap_eyes` in `config.yaml` is wrong for this rig. Changing it requires a new calibration (or exchanging the roles of the captured pairs) and a new `adas.ref_center_x_normalized`. |
 
 ## When in Doubt
 

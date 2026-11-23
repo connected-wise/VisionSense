@@ -59,6 +59,7 @@ rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr right_info_pub = null
 Publisher<std_msgs::msg::Float32> framerate_pub = NULL;
 Publisher<std_msgs::msg::Header> timestamp_pub = NULL;
 
+bool swap_eyes = false;
 uchar3* left_gpu = NULL;
 uchar3* right_gpu = NULL;
 
@@ -282,19 +283,22 @@ bool acquireStereoFrame()
 		buffers_initialized = true;
 	}
 
+	// The kernels write sensor cols [0..stereo_width/2) to their first output
+	// and cols [stereo_width/2..stereo_width) to their second. Which of the
+	// two is the physical left camera depends on the wiring and the mount:
+	// with the pair mounted upside down (cuda_flip rotate-180), the sensor in
+	// the frame's left half is the camera on the right. swap_eyes exchanges
+	// the outputs so /camera_stereo/left is the physical left camera, which
+	// stereo depth requires (a calibration then has a negative Tx).
+	uchar3* first_half  = swap_eyes ? right_gpu : left_gpu;
+	uchar3* second_half = swap_eyes ? left_gpu  : right_gpu;
+
 	cudaError_t err;
 	if (rotated_lenses)
-		err = cudaStereoCropSplitRotate(nextFrame, left_gpu, right_gpu,
+		err = cudaStereoCropSplitRotate(nextFrame, first_half, second_half,
 		                                 stereo_width, stereo_height, output_w, NULL);
 	else
-		// Sensor cols [0..stereo_width/2) → leftOut → /camera_stereo/left.
-		// Sensor cols [stereo_width/2..stereo_width) → rightOut → /camera_stereo/right.
-		// No L↔R buffer swap: topics carry the raw split-half assignment of the
-		// Arducam sensor, matching the current physical wiring. NOTE: the
-		// stereo_calib.yaml in this tree predates the physical sensor swap and
-		// must be regenerated (capture_stereo_calib.py + compute_stereo_calib.py)
-		// before stereo depth output is geometrically meaningful.
-		err = cudaStereoCropSplitFlip(nextFrame, left_gpu, right_gpu,
+		err = cudaStereoCropSplitFlip(nextFrame, first_half, second_half,
 		                               stereo_width, stereo_height, cuda_flip_mode, NULL);
 
 	if (err != cudaSuccess)
@@ -384,6 +388,7 @@ int main(int argc, char **argv)
 	ROS_DECLARE_PARAMETER("rotated_lenses", rotated_lenses);
 	ROS_DECLARE_PARAMETER("enable_timing", enable_timing);
 	ROS_DECLARE_PARAMETER("cuda_flip", cuda_flip_str);
+	ROS_DECLARE_PARAMETER("swap_eyes", swap_eyes);
 	// Optical geometry — used to populate CameraInfo (K/P) for the ESS path and
 	// any other consumer that needs intrinsics. sensor_width_mm should reflect
 	// what the consumer downstream actually sees (e.g. 2.7 for the 900×900
@@ -410,6 +415,7 @@ int main(int argc, char **argv)
 	ROS_GET_PARAMETER("rotated_lenses", rotated_lenses);
 	ROS_GET_PARAMETER("enable_timing", enable_timing);
 	ROS_GET_PARAMETER("cuda_flip", cuda_flip_str);
+	ROS_GET_PARAMETER("swap_eyes", swap_eyes);
 	double baseline_mm_param = 0.0;
 	ROS_GET_PARAMETER("focal_length_mm", focal_length_mm_);
 	ROS_GET_PARAMETER("sensor_width_mm", sensor_width_mm_);
