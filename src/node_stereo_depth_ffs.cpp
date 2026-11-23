@@ -9,8 +9,8 @@
  * FFS specifics (from fast_foundationstereo.yaml):
  *   - input shape: 320×320 (square, vs LightStereo's 320×512)
  *   - max_disp:    64        (vs 192 for LightStereo) — limits the
- *                            closest measurable depth to ~0.46 m at
- *                            100 mm baseline
+ *                            closest measurable depth to ~0.44 m at
+ *                            95 mm baseline
  *   - normalize:   false     (cross-validated empirically; engine
  *                            handles any required input scaling)
  *

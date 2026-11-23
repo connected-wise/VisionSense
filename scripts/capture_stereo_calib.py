@@ -130,8 +130,9 @@ def fit_width(img: np.ndarray, max_w: int) -> np.ndarray:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", default="/dev/video1",
-                    help="V4L2 device path (default /dev/video1)")
+    ap.add_argument("--device", default="/dev/video-stereo",
+                    help="V4L2 device path (default /dev/video-stereo, the udev name "
+                         "of the stereo camera; its /dev/videoN number can change)")
     ap.add_argument("--out", default="./stereo_calib_images",
                     help="directory to save captured pairs")
     ap.add_argument("--cols", type=int, default=7,
@@ -159,7 +160,7 @@ def main():
     if index:
         print(f"[info] resuming from index {index} ({index} existing pair(s) in {args.out})")
 
-    cap = open_capture(args.device, RAW_W, RAW_H)
+    cap = open_capture(os.path.realpath(args.device), RAW_W, RAW_H)
 
     win = "calib capture — L | R   (SPACE = save, Q/ESC = quit)"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
