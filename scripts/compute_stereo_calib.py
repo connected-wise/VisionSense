@@ -20,7 +20,7 @@ capture script. The board's physical square size matters for absolute scale
 A good calibration on this rig should produce:
     per-eye RMS reprojection error  < 0.5 px
     stereo RMS                      < 1.0 px
-    baseline (||T||)                ~ 0.10 m (matches the measured 101.3 mm)
+    baseline (||T||)                ~ the physical lens spacing (--baseline-mm, 95 mm)
 """
 
 import argparse
@@ -169,6 +169,8 @@ def main():
                     help="chessboard inner corners per column (default 5)")
     ap.add_argument("--square-mm", type=float, default=30.0,
                     help="physical chessboard square size in millimetres (default 30 mm)")
+    ap.add_argument("--baseline-mm", type=float, default=95.0,
+                    help="physical lens spacing, to sanity-check the result (default 95)")
     ap.add_argument("--fix-aspect", action="store_true",
                     help="constrain fx == fy (set if you trust pixels are square)")
     ap.add_argument("--sample", default="./stereo_calib_rectified_sample.png",
@@ -404,8 +406,8 @@ def main():
         print("  ⚠ per-eye RMS > 0.5 px — capture more / better-spread pairs and re-run")
     if rms_stereo > 1.0:
         print("  ⚠ stereo RMS > 1.0 px — rectification will be loose; recapture")
-    if abs(baseline_m * 1000.0 - 101.3) > 5.0:
-        print(f"  ⚠ baseline ({baseline_m*1000:.1f} mm) differs from expected 101.3 mm "
+    if abs(baseline_m * 1000.0 - args.baseline_mm) > 5.0:
+        print(f"  ⚠ baseline ({baseline_m*1000:.1f} mm) differs from expected {args.baseline_mm:.1f} mm "
               f"by more than 5 mm — check chessboard square size and pose diversity")
 
 
