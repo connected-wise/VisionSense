@@ -45,6 +45,11 @@ camera_stereo:
         # symmetric vertical crop). true → 1200×1200 (90° per-eye rotation).
         rotated_lenses:     false
         cuda_flip:          "rotate-180" # "rotate-180" | "vertical-flip" | "horizontal-flip" | ""
+        # Exchange the two halves of the frame so /camera_stereo/left is the
+        # physical left camera. Needed here: the pair is mounted upside down,
+        # which puts the right camera in the frame's left half. A calibration
+        # of a correctly ordered pair has a negative Tx (positive baseline).
+        swap_eyes:          true
         disparity_range:    128
         # AR0234 sensor is 5.76 mm wide. The 1440-wide eye is center-cropped to
         # 900×900 (= 5.76 × 900/1920 = 2.7 mm) before LightStereo resizes to 320.
@@ -149,12 +154,12 @@ adas:
     ros__parameters:
         # Normalized X (0..1) position of the camera optical center within the
         # lanedet frame. Used as the split point for ego-left/ego-right lane
-        # boundary selection. The physical mount on this rig is biased
-        # right-of-image-center; 0.5 makes the selector treat the actual left
-        # lane as the right ego boundary. Re-measure after any re-mount or
-        # main_eye change: drive a straight lane and watch
-        # /adas/adas_alerts.current_lane_midpoint_x under good conditions.
-        ref_center_x_normalized: 0.65
+        # boundary selection. Each eye is an off-center crop of its sensor,
+        # so this is not 0.5: start from K's cx / image_width of the main eye
+        # in stereo_calib.yaml (K_left: 491 / 1440 = 0.34). Re-measure after
+        # any re-mount, recalibration or main_eye change: drive a straight
+        # lane and watch /adas/adas_alerts.current_lane_midpoint_x.
+        ref_center_x_normalized: 0.34
 
 # 3F0R only: pothole segmentation on the forward mono camera (YOLOv8s-seg).
 road_damage:
@@ -164,6 +169,10 @@ road_damage:
         camera_topic:   "/camera/raw"
         labels:         "pothole"   # class names in model order, comma-separated
         confidence:     0.4
+        # Frames per second to segment (0 = every camera frame). The GPU is
+        # shared with stereo depth, detection and lanes; at the camera's full
+        # rate this node alone slows depth by about half.
+        max_rate_hz:    5.0
         # Each event appends a row (time, GPS position, count, confidence,
         # area) to events.csv here and saves the annotated frame. "" = off.
         log_dir:        "~/VisionSense_data/road_damage"

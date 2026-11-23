@@ -15,10 +15,9 @@ node_camera_stereo so the saved frames are byte-equivalent to the published
        (keep rows [150 .. 1049], 900 tall)
   3. Per-eye 180° rotation (matches cuda_flip=rotate-180; camera mounted
      upside-down on this rig).
-  4. No L/R buffer swap — saved left_*.png comes from sensor cols [480..1919]
-     (the kernel's leftOut), matching /camera_stereo/left/image_raw after the
-     physical sensor swap. Pass --swap to re-enable the old upside-down
-     compensation behavior.
+  4. L/R swap as camera_stereo.swap_eyes in config/config.yaml says (override
+     with --swap / --no-swap): with it, saved left_*.png comes from sensor
+     cols [1920..3359], matching /camera_stereo/left/image_raw.
 
 Press SPACE to save a synchronized pair (one capture = one pair); only saves
 when BOTH eyes detect the full chessboard. Press Q/ESC to quit. Re-runs
@@ -76,6 +75,21 @@ def open_capture(device: str, width: int, height: int) -> cv2.VideoCapture:
     return cap
 
 
+def config_swap_eyes() -> bool:
+    """camera_stereo.swap_eyes from config/config.yaml, so the saved pairs
+    match what the node publishes."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "config", "config.yaml")
+    try:
+        import yaml
+        with open(path) as fp:
+            cfg = yaml.safe_load(fp)
+        return bool(cfg["camera_stereo"]["ros__parameters"].get("swap_eyes", False))
+    except Exception as e:
+        print(f"[warn] could not read swap_eyes from {path} ({e}); not swapping")
+        return False
+
+
 def split_and_process(frame: np.ndarray, rotate_180: bool, swap_lr: bool):
     """Replicate node_camera_stereo's crop + rotate + L/R-swap pipeline.
 
@@ -92,9 +106,8 @@ def split_and_process(frame: np.ndarray, rotate_180: bool, swap_lr: bool):
         sensor_right = cv2.rotate(sensor_right, cv2.ROTATE_180)
 
     if swap_lr:
-        # Legacy upside-down compensation: topic-left ← sensor-right
-        # cropped+rotated. Off by default — the live node_camera_stereo no
-        # longer does this swap after the physical sensor rearrangement.
+        # camera_stereo.swap_eyes: topic-left ← sensor-right cropped+rotated
+        # (pair mounted upside down, so the frame's halves are reversed).
         return sensor_right.copy(), sensor_left.copy()
     return sensor_left.copy(), sensor_right.copy()
 
@@ -144,11 +157,14 @@ def main():
                     help="max width per eye in the preview window")
     ap.add_argument("--no-rotate", action="store_true",
                     help="skip the per-eye 180° rotation (camera mounted upright)")
-    ap.add_argument("--swap", action="store_true",
-                    help="enable legacy L/R buffer swap (only if node_camera_stereo "
-                         "still applies the upside-down-mount swap; off by default "
-                         "after the physical sensor rearrangement)")
+    ap.add_argument("--swap", dest="swap", action="store_true", default=None,
+                    help="exchange the two eyes, like camera_stereo.swap_eyes "
+                         "(default: what config/config.yaml says)")
+    ap.add_argument("--no-swap", dest="swap", action="store_false",
+                    help="do not exchange the two eyes")
     args = ap.parse_args()
+    if args.swap is None:
+        args.swap = config_swap_eyes()
 
     pattern = (args.cols, args.rows)
     rotate_180 = not args.no_rotate

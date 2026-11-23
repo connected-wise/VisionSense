@@ -9,8 +9,12 @@ matches features between the two eyes. In a correctly rectified pair a point
 sits on the same row in both images, so the vertical offset of the matches
 tells how good the calibration is:
 
-    median within about +-0.5 px, mean |offset| under 1 px   calibration fits
-    several pixels or more                                    recalibrate
+    median within +-1.5 px, mean |offset| under 2 px   calibration fits
+    more than that                                      recalibrate
+
+(The stereo network runs at 320 px width, 4.5x smaller than an eye, so
+1.5 px here is a third of a pixel for it. A fresh calibration measures about
+1 px on a scene a few meters away.)
 
 A wrong calibration does not only make distances wrong: the stereo network
 searches along rows, so it loses the match altogether.
@@ -147,9 +151,14 @@ def main():
         median_dy, mean_abs_dy, negative = result
     except NameError:
         return 2
-    if median_dy <= 0.5 and mean_abs_dy <= 1.0 and negative < 0.05:
+    if median_dy <= 1.5 and mean_abs_dy <= 2.0 and negative < 0.05:
         print("OK: the calibration fits this camera")
         return 0
+    if negative >= 0.5:
+        print("EYES SWAPPED: disparity is negative, so /camera_stereo/left is the "
+              "right camera. Flip camera_stereo.swap_eyes in config/config.yaml "
+              "and recalibrate.")
+        return 1
     print("RECALIBRATE: the rectified rows do not line up "
           "(scripts/capture_stereo_calib.py, then scripts/compute_stereo_calib.py)")
     return 1
